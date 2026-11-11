@@ -38,6 +38,7 @@ uintptr_t g_domain = 0;
 char g_libName[64] = {};
 bool g_scanned = false;
 int g_seenMods = -1;
+bool g_unityIl2 = false;
 pid_t g_hintPid = 0;
 char g_hintCmd[180] = {};
 
@@ -663,6 +664,7 @@ void attach_reset() {
     g_libName[0] = 0;
     g_scanned = false;
     g_seenMods = -1;
+    g_unityIl2 = false;
     g_state.store(0);
 }
 
@@ -718,45 +720,98 @@ uintptr_t find_root_domain(pid_t pid) {
         return 0;
     }
     logf("[il2cpp] root name @ 0x%llx", (unsigned long long)strAt);
+    g_unityIl2 = true;
+    uintptr_t copies[4] = {strAt, 0, 0, 0};
+    int ncopies = 1;
+    auto rw_region = [](const char *perms, const char *file) {
+        if (perms[0] != 'r' || perms[1] != 'w') return false;
+        if (std::strstr(file, "/system/") || std::strstr(file, "/apex/") || std::strstr(file, "/vendor/") ||
+            std::strstr(file, "[stack") || std::strstr(file, "/dev/"))
+            return false;
+        return true;
+    };
     std::rewind(fp);
-    uintptr_t hits[8] = {};
-    int nhits = 0;
-    while (nhits < 8 && std::fgets(line, sizeof(line), fp)) {
+    while (ncopies < 4 && std::fgets(line, sizeof(line), fp)) {
         unsigned long start = 0, end = 0;
         char perms[8] = {};
         char file[512] = {};
         file[0] = 0;
         if (std::sscanf(line, "%lx-%lx %7s %*s %*s %*s %511[^\n]", &start, &end, perms, file) < 3)
             continue;
-        if (perms[0] != 'r' || perms[1] != 'w' || !std::strstr(file, "libunity.so")) continue;
-        for (uintptr_t addr = (uintptr_t)start; addr + 8 <= (uintptr_t)end && nhits < 8;) {
+        if (!rw_region(perms, file) || end <= start) continue;
+        if ((size_t)(end - start) > 512u * 1024u * 1024u) continue;
+        size_t keep = 0;
+        for (uintptr_t addr = (uintptr_t)start; addr < (uintptr_t)end && ncopies < 4;) {
+            size_t n = (uintptr_t)end - addr;
+            if (n > 65536) n = 65536;
+            if (!mem_read(pid, addr, chunk + keep, n)) break;
+            const size_t total = keep + n;
+            if (total >= nlen) {
+                for (size_t i = 0; i + nlen <= total && ncopies < 4; ++i) {
+                    if (std::memcmp(chunk + i, needle, nlen) != 0) continue;
+                    uintptr_t at = addr - keep + i;
+                    bool seen = false;
+                    for (int c = 0; c < ncopies; ++c)
+                        if (copies[c] == at) seen = true;
+                    if (!seen) copies[ncopies++] = at;
+                }
+            }
+            keep = nlen > 1 ? nlen - 1 : 0;
+            if (keep && total >= keep) std::memmove(chunk, chunk + total - keep, keep);
+            addr += n;
+        }
+    }
+    std::rewind(fp);
+    uintptr_t hits[12] = {};
+    int nhits = 0;
+    size_t scanned = 0;
+    logf("[il2cpp] scanning rw memory for domain");
+    while (nhits < 12 && std::fgets(line, sizeof(line), fp)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {};
+        char file[512] = {};
+        file[0] = 0;
+        if (std::sscanf(line, "%lx-%lx %7s %*s %*s %*s %511[^\n]", &start, &end, perms, file) < 3)
+            continue;
+        if (!rw_region(perms, file) || end <= start) continue;
+        if ((size_t)(end - start) > 512u * 1024u * 1024u) continue;
+        uintptr_t addr = (uintptr_t)start;
+        if (addr & 7) addr = (addr + 7) & ~7ull;
+        while (addr + 8 <= (uintptr_t)end && nhits < 12) {
             size_t n = (uintptr_t)end - addr;
             if (n > 65536) n = 65536;
             n &= ~7u;
             if (n < 8) break;
             if (!mem_read(pid, addr, chunk, n)) break;
-            for (size_t i = 0; i + 8 <= n && nhits < 8; i += 8) {
+            scanned += n;
+            for (size_t i = 0; i + 8 <= n && nhits < 12; i += 8) {
                 uintptr_t val = 0;
                 std::memcpy(&val, chunk + i, 8);
-                if (val == strAt) hits[nhits++] = addr + i;
+                for (int c = 0; c < ncopies; ++c)
+                    if (val == copies[c]) hits[nhits++] = addr + i;
             }
             addr += n;
         }
     }
     std::fclose(fp);
-    const int offs[] = {0x18, 0x10, 0x20, 0x8, 0x28};
+    logf("[il2cpp] rw scanned=%zuMB copies=%d ptrs=%d", scanned / (1024u * 1024u), ncopies, nhits);
+    const int offs[] = {0x0, 0x8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38};
     for (int h = 0; h < nhits; ++h) {
         for (int off : offs) {
             if (hits[h] < (uintptr_t)off) continue;
             uintptr_t dom = hits[h] - (uintptr_t)off;
             if (dom & 7) continue;
-            uintptr_t words[6] = {};
+            uintptr_t words[8] = {};
+            if (off / 8 >= 8) continue;
             if (!mem_read(pid, dom, words, sizeof(words))) continue;
-            if (words[off / 8] != strAt) continue;
+            bool nameMatch = false;
+            for (int c = 0; c < ncopies; ++c)
+                if (words[off / 8] == copies[c]) nameMatch = true;
+            if (!nameMatch) continue;
             int ptrs = 0;
             for (uintptr_t w : words)
                 if (mem_ptr_ok(w)) ++ptrs;
-            if (ptrs < 2) continue;
+            if (ptrs < 1) continue;
             logf("[il2cpp] domain=0x%llx friendly+%#x", (unsigned long long)dom, off);
             return dom;
         }
@@ -939,6 +994,7 @@ void attach_tick() {
         g_libName[0] = 0;
         g_scanned = false;
         g_seenMods = -1;
+        g_unityIl2 = false;
     }
     g_pid = best.pid;
     g_unity = best.unity;
@@ -967,29 +1023,35 @@ void attach_tick() {
             } else {
                 ++retry;
                 const bool verbose = g_seenMods != (int)mods.size();
-                if (verbose) {
-                    logf("[il2cpp] pid=%d modules=%zu", (int)best.pid, mods.size());
+                if (verbose && !g_unityIl2) {
+                    logf("[il2cpp] pid=%d modules=%zu libunity", (int)best.pid, mods.size());
                     find_domain_get(best.pid, mods, g_domainGet, g_libName, sizeof(g_libName), true);
                     if (!g_domainGet) log_disk_siblings(mods);
                     g_seenMods = (int)mods.size();
+                } else if (verbose) {
+                    g_seenMods = (int)mods.size();
                 }
-                if (!g_domainGet && !g_domain && (verbose || (retry % 3) == 0))
+                if (!g_unityIl2 && !g_domainGet && !g_domain && (verbose || (retry % 3) == 0))
                     scan_rx_elfs(best.pid, g_domainGet, g_libName, sizeof(g_libName));
-                if (g_domainGet) {
+                if (g_domainGet && !g_domain) {
                     if (domain_from_getter(best.pid, g_domainGet, g_domain))
                         logf("[il2cpp] domain=0x%llx", (unsigned long long)g_domain);
                     else
                         logf("[il2cpp] domain decode pending");
                 }
-                if (!g_domain && !g_domainGet && verbose) {
+                if (!g_domain && (verbose || (g_unityIl2 && (retry % 8) == 1))) {
                     uintptr_t dom = find_root_domain(best.pid);
                     if (dom) {
                         g_domain = dom;
                         std::snprintf(g_libName, sizeof(g_libName), "libunity.so");
                     }
                 }
-                if (!g_domain && !g_domainGet && verbose)
-                    logf("[il2cpp] still waiting for libil2cpp to map");
+                if (!g_domain && !g_domainGet && verbose) {
+                    if (g_unityIl2)
+                        logf("[il2cpp] libunity is il2cpp, domain pending");
+                    else
+                        logf("[il2cpp] still waiting for libil2cpp to map");
+                }
             }
         }
     } else if (!best.unity && !best.il2) {
@@ -998,7 +1060,10 @@ void attach_tick() {
 
     if (g_domain || g_domainGet) {
         g_state.store(2);
-        set_status("Resolved %s pid %d", g_libName[0] ? g_libName : "il2cpp", (int)best.pid);
+        set_status("Resolved libunity pid %d", (int)best.pid);
+    } else if (g_unityIl2) {
+        g_state.store(1);
+        set_status("libunity il2cpp pid %d", (int)best.pid);
     } else if (best.unity || best.il2) {
         g_state.store(1);
         set_status("CODM pid %d  waiting for il2cpp", (int)best.pid);
