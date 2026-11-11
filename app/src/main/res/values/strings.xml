@@ -6,7 +6,8 @@
     <string name="btn_start">Start menu</string>
     <string name="toast_need_overlay">Allow display over other apps, then come back.</string>
     <string name="toast_started">Menu is on screen.</string>
-    <string name="toast_resolved">CODM ready</string>
+    <string name="toast_found">CODM found</string>
+    <string name="toast_resolved">IL2CPP resolved</string>
     <string name="btn_game">Open CODM</string>
     <string name="overlay_running">Menu is already open.</string>
     <string name="notif_channel">JNMaini overlay</string>

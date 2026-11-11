@@ -27,6 +27,7 @@ LOCAL_ARM_MODE := arm
 LOCAL_C_INCLUDES := $(LOCAL_PATH)
 
 LOCAL_SRC_FILES :=  main.cpp \
+                    codm_attach.cpp \
                     ANOGS/Fake_dlfcn.cpp \
                     ANOGS/Il2Cpp.cpp \
                     ANOGS/Tools.cpp \

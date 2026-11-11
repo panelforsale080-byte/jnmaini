@@ -37,7 +37,7 @@ public class OverlayService extends Service {
     private TextView fab;
     private WindowManager.LayoutParams surfaceLp;
     private boolean menuOpen = true;
-    private boolean readyToasted = false;
+    private int toastLevel = 0;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Runnable pollGame = new Runnable() {
         @Override
@@ -47,11 +47,14 @@ public class OverlayService extends Service {
                 state = NativeBridge.nativePollAttach();
             } catch (Throwable ignored) {
             }
-            if (state >= 1 && !readyToasted) {
-                readyToasted = true;
+            if (state >= 2 && toastLevel < 2) {
+                toastLevel = 2;
                 Toast.makeText(OverlayService.this, R.string.toast_resolved, Toast.LENGTH_LONG).show();
+            } else if (state == 1 && toastLevel < 1) {
+                toastLevel = 1;
+                Toast.makeText(OverlayService.this, R.string.toast_found, Toast.LENGTH_LONG).show();
             } else if (state == 0) {
-                readyToasted = false;
+                toastLevel = 0;
             }
             main.postDelayed(this, 1000L);
         }
