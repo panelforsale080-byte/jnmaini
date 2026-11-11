@@ -11,6 +11,7 @@
 #include <dirent.h>     
 #include <unistd.h>      
 #include <EGL/egl.h>
+#include <GLES3/gl3.h>
 #include <unordered_map>
 #include "Includes/Utils.h"
 #include "ImGui/Call_ImGui.h"
@@ -61,10 +62,11 @@ void DrawAndTouch(ImTextureID textureID, ImVec2& position, float radius, int opa
 
 
 
-EGLBoolean (*orig_eglSwapBuffers)(...);
-EGLBoolean _eglSwapBuffers (EGLDisplay dpy, EGLSurface surface) {
-eglQuerySurface(dpy, surface, EGL_WIDTH, &glWidth);
-eglQuerySurface(dpy, surface, EGL_HEIGHT, &glHeight);
+static void draw_imgui_frame(bool gameTouch) {
+if (!gameTouch) {
+    glClearColor(0.f, 0.f, 0.f, 0.f);
+    glClear(GL_COLOR_BUFFER_BIT);
+}
 if (!g_Initialized) {
     ImGui::CreateContext();
     ImGuiStyle& style = ImGui::GetStyle();
@@ -163,11 +165,11 @@ io.Fonts->Build();
 
 
 ImGuiIO* io = &ImGui::GetIO();
-ImGui_GetTouch(io, get_height());
+if (gameTouch) ImGui_GetTouch(io, get_height());
 ImGui_ImplOpenGL3_NewFrame();
 ImGui_ImplAndroid_NewFrame(glWidth, glHeight);
 ImGui::NewFrame();
-DrawESP(ImGui::GetBackgroundDrawList());// ESP AIM THREAD
+if (started) DrawESP(ImGui::GetBackgroundDrawList());
 
 
 if (checkboxStates["HAND::CAM"]) {
@@ -243,8 +245,13 @@ if (isToggled)
 {
    
 ImVec2 center2 = ImGui::GetMainViewport()->GetCenter();
-ImGui::SetNextWindowPos(center2, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-ImGui::SetNextWindowSize(ImVec2(830, 500)); 
+ImVec2 display = ImGui::GetIO().DisplaySize;
+float menuW = 830.f;
+float menuH = 500.f;
+if (display.x > 48.f && menuW > display.x - 24.f) menuW = display.x - 24.f;
+if (display.y > 48.f && menuH > display.y - 24.f) menuH = display.y - 24.f;
+ImGui::SetNextWindowPos(center2, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+ImGui::SetNextWindowSize(ImVec2(menuW, menuH), ImGuiCond_Always); 
 ImGui::PushFont(Crozn);
 if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
 {
@@ -532,7 +539,48 @@ if (clearMousePos && !io->MouseDown[0]) {
     io->MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     clearMousePos = false;
 }
-return orig_eglSwapBuffers(dpy, surface);
+}
+
+EGLBoolean (*orig_eglSwapBuffers)(...);
+EGLBoolean _eglSwapBuffers (EGLDisplay dpy, EGLSurface surface) {
+    eglQuerySurface(dpy, surface, EGL_WIDTH, &glWidth);
+    eglQuerySurface(dpy, surface, EGL_HEIGHT, &glHeight);
+    draw_imgui_frame(true);
+    return orig_eglSwapBuffers(dpy, surface);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeSetDisplaySize(JNIEnv *, jclass, jint w, jint h) {
+    if (w > 0) glWidth = w;
+    if (h > 0) glHeight = h;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeGlDrawFrame(JNIEnv *, jclass) {
+    draw_imgui_frame(false);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeTouch(JNIEnv *, jclass, jint action, jfloat x, jfloat y) {
+    ImGuiIO &io = ImGui::GetIO();
+    if (action == 1 || action == 3) {
+        io.MouseDown[0] = false;
+        clearMousePos = true;
+    } else {
+        io.MousePos = ImVec2(x, y);
+        io.MouseDown[0] = true;
+        clearMousePos = false;
+    }
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeSetMenuOpen(JNIEnv *, jclass, jboolean open) {
+    isToggled = open;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeIsMenuOpen(JNIEnv *, jclass) {
+    return isToggled;
 }
 
 

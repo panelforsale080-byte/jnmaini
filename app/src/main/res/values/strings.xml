@@ -1,4 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">JNMaini</string>
+    <string name="tagline">Overlay menu</string>
+    <string name="btn_overlay">Allow overlay</string>
+    <string name="btn_start">Start menu</string>
+    <string name="toast_need_overlay">Allow display over other apps, then come back.</string>
+    <string name="toast_started">Menu is on screen.</string>
+    <string name="overlay_running">Menu is already open.</string>
+    <string name="notif_channel">JNMaini overlay</string>
+    <string name="notif_text">Overlay menu is running</string>
 </resources>
