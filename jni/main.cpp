@@ -43,7 +43,8 @@ ImFont* LOGIN = nullptr;
 ImFont* F48 = nullptr;
 ImFont* Crozn = nullptr;
 static bool checked = false;
-static bool isToggled = false; 
+static bool isToggled = false;
+static void copy_attach_logs(); 
 
 void DrawAndTouch(ImTextureID textureID, ImVec2& position, float radius, int opacity, bool& isToggled) {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -264,7 +265,7 @@ if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
     
     ImGui::BeginChild("##ScrollablePage", ImVec2(-1, -1), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
     
-    static int tab = 1;
+    static int tab = 8;
     
     ImGui::Columns(2);
     ImGui::SetColumnOffset(1, 200); 
@@ -286,6 +287,7 @@ if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
             { ICON_FA_MICROCHIP,  3, 0.0f },
          { ICON_FA_BULLSEYE,   7, 0.0f },
             { ICON_FA_COGS,       5, 0.0f },
+            { "LOG",              8, 0.0f },
         };
         
         ImGuiIO& io = ImGui::GetIO();
@@ -330,15 +332,6 @@ if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
         
         ImGui::NextColumn();
         ImGui::BeginChild("right_content", ImVec2(0, 0), true);
-        {
-            static char logBuf[7000];
-            attach_log_copy(logBuf, sizeof(logBuf));
-            ImGui::TextUnformatted(attach_status_text());
-            ImGui::BeginChild("##attachlog", ImVec2(-1, 140), true);
-            ImGui::TextUnformatted(logBuf[0] ? logBuf : "Waiting for scan");
-            ImGui::SetScrollHereY(1.0f);
-            ImGui::EndChild();
-        }
 
         if (tab == 1) {
             if (checkboxStates["ESP ENABLE"]) {
@@ -536,6 +529,19 @@ if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
             ImGui::Spacing();
             WeaponCfg::DrawTab();
         }
+        if (tab == 8)
+        {
+            ImGui::TextUnformatted("LOG");
+            ImGui::TextWrapped("%s", attach_status_text());
+            if (ImGui::Button("Copy all logs", ImVec2(-1, 48)))
+                copy_attach_logs();
+            static char logBuf[20000];
+            attach_log_copy(logBuf, sizeof(logBuf));
+            ImGui::BeginChild("##attachlog", ImVec2(-1, -1), true, ImGuiWindowFlags_HorizontalScrollbar);
+            ImGui::TextUnformatted(logBuf[0] ? logBuf : "Waiting for scan");
+            ImGui::SetScrollHereY(1.0f);
+            ImGui::EndChild();
+        }
         ImGui::EndChild();
         ImGui::Columns(1);
     }
@@ -552,6 +558,33 @@ if (clearMousePos && !io->MouseDown[0]) {
     io->MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
     clearMousePos = false;
 }
+}
+
+static JavaVM *g_vm = nullptr;
+static jclass g_bridge = nullptr;
+static jmethodID g_copyText = nullptr;
+
+static void copy_attach_logs() {
+    char buf[20000];
+    attach_log_copy(buf, sizeof(buf));
+    if (!g_vm || !g_bridge || !g_copyText) {
+        attach_log_line("[log] copy failed, clipboard is not ready");
+        return;
+    }
+    JNIEnv *env = nullptr;
+    bool detach = false;
+    jint st = g_vm->GetEnv((void **)&env, JNI_VERSION_1_6);
+    if (st == JNI_EDETACHED) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != 0) return;
+        detach = true;
+    } else if (st != JNI_OK || !env) {
+        return;
+    }
+    jstring s = env->NewStringUTF(buf);
+    env->CallStaticVoidMethod(g_bridge, g_copyText, s);
+    env->DeleteLocalRef(s);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (detach) g_vm->DetachCurrentThread();
 }
 
 EGLBoolean (*orig_eglSwapBuffers)(...);
@@ -603,6 +636,13 @@ Java_com_jnmaini_overlay_NativeBridge_nativePollAttach(JNIEnv *, jclass) {
     return attach_state();
 }
 
+extern "C" JNIEXPORT void JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeHintProcess(JNIEnv *env, jclass, jint pid, jstring name) {
+    const char *s = name ? env->GetStringUTFChars(name, nullptr) : nullptr;
+    attach_hint_pid((int)pid, s ? s : "");
+    if (name && s) env->ReleaseStringUTFChars(name, s);
+}
+
 void Init_Thread() {
     for (;;) {
         attach_tick();
@@ -616,7 +656,15 @@ void native_Init() {
 }
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
-    JNIEnv *env;
-    vm->GetEnv((void **) &env, JNI_VERSION_1_6);
+    g_vm = vm;
+    JNIEnv *env = nullptr;
+    if (vm->GetEnv((void **)&env, JNI_VERSION_1_6) != JNI_OK || !env) return JNI_VERSION_1_6;
+    jclass cls = env->FindClass("com/jnmaini/overlay/NativeBridge");
+    if (cls) {
+        g_bridge = (jclass)env->NewGlobalRef(cls);
+        g_copyText = env->GetStaticMethodID(cls, "copyText", "(Ljava/lang/String;)V");
+        env->DeleteLocalRef(cls);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
     return JNI_VERSION_1_6;
 }

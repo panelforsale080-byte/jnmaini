@@ -18,8 +18,8 @@
 namespace {
 
 constexpr const char *kPkg = "com.garena.game.codm";
-constexpr size_t kMaxLines = 48;
-constexpr size_t kLineCap = 220;
+constexpr size_t kMaxLines = 80;
+constexpr size_t kLineCap = 240;
 
 std::mutex g_mu;
 char g_lines[kMaxLines][kLineCap];
@@ -37,6 +37,8 @@ uintptr_t g_domainGet = 0;
 uintptr_t g_domain = 0;
 char g_libName[64] = {};
 bool g_scanned = false;
+pid_t g_hintPid = 0;
+char g_hintCmd[180] = {};
 
 void push_line(const char *line) {
     std::lock_guard<std::mutex> lock(g_mu);
@@ -544,9 +546,35 @@ void attach_log_copy(char *dst, size_t cap) {
 
 int attach_state() { return g_state.load(); }
 
+void attach_log_line(const char *line) {
+    if (line && line[0]) logf("%s", line);
+}
+
+void attach_hint_pid(int pid, const char *cmd) {
+    if (pid <= 0) return;
+    g_hintPid = (pid_t)pid;
+    std::snprintf(g_hintCmd, sizeof(g_hintCmd), "%s", cmd ? cmd : "");
+    logf("[java] pid=%d %s", pid, g_hintCmd);
+}
+
+static pid_t pid_from_cmd(const char *cmd) {
+    FILE *fp = popen(cmd, "r");
+    if (!fp) {
+        logf("[scan] popen fail %s", cmd);
+        return 0;
+    }
+    char buf[128] = {};
+    char *got = std::fgets(buf, sizeof(buf), fp);
+    int rc = pclose(fp);
+    int pid = got ? std::atoi(buf) : 0;
+    logf("[scan] %s -> %d rc=%d", cmd, pid, rc);
+    return pid > 0 ? (pid_t)pid : 0;
+}
+
 void attach_tick() {
     static std::atomic<int> lock{0};
     if (lock.exchange(1)) return;
+    logf("[scan] reading /proc for %s", kPkg);
 
     DIR *d = opendir("/proc");
     if (!d) {
@@ -560,26 +588,49 @@ void attach_tick() {
     Cand best{};
     int visible = 0;
     int matched = 0;
+    int mapsOpened = 0;
+    int samples = 0;
     struct dirent *ent;
-    while ((ent = readdir(d)) != nullptr) {
-        if (ent->d_name[0] < '1' || ent->d_name[0] > '9') continue;
-        pid_t pid = (pid_t)std::atoi(ent->d_name);
-        if (pid <= 0) continue;
-        ++visible;
+    auto consider = [&](pid_t pid) {
+        if (pid <= 0) return;
         char cmd[180] = {};
-        const bool hasCmd = read_cmdline(pid, cmd, sizeof(cmd));
-        const bool cmdHit = hasCmd && std::strstr(cmd, kPkg);
-        if (hasCmd && !cmdHit) continue;
-        if (!cmdHit && !maps_contain(pid, kPkg)) continue;
+        read_cmdline(pid, cmd, sizeof(cmd));
+        const bool cmdHit = std::strstr(cmd, kPkg) != nullptr;
+        bool mapsPkg = false;
+        uintptr_t unity = 0, il2 = 0, anogs = 0;
+        char path[64];
+        std::snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
+        FILE *fp = std::fopen(path, "r");
+        if (fp) {
+            ++mapsOpened;
+            char line[768];
+            while (std::fgets(line, sizeof(line), fp)) {
+                if (!unity && std::strstr(line, "libunity.so"))
+                    unity = (uintptr_t)std::strtoull(line, nullptr, 16);
+                if (!il2 && std::strstr(line, "libil2cpp.so"))
+                    il2 = (uintptr_t)std::strtoull(line, nullptr, 16);
+                if (!anogs && std::strstr(line, "libanogs.so"))
+                    anogs = (uintptr_t)std::strtoull(line, nullptr, 16);
+                if (std::strstr(line, kPkg)) mapsPkg = true;
+            }
+            std::fclose(fp);
+        }
+        if (!cmdHit && !mapsPkg && !anogs && !(unity && il2)) {
+            if (samples < 6 && cmd[0] && (std::strstr(cmd, "game") || std::strstr(cmd, "unity") ||
+                                          std::strstr(cmd, "garena") || std::strstr(cmd, "cod"))) {
+                logf("[proc] pid=%d %s", (int)pid, cmd);
+                ++samples;
+            }
+            return;
+        }
         ++matched;
-        uintptr_t unity = map_base(pid, "libunity.so", nullptr, 0);
-        uintptr_t il2 = map_base(pid, "libil2cpp.so", nullptr, 0);
-        uintptr_t anogs = map_base(pid, "libanogs.so", nullptr, 0);
         int score = 0;
         if (il2) score += 100;
         if (unity) score += 50;
-        if (anogs) score += 10;
-        if (cmdHit) score += 1;
+        if (anogs) score += 40;
+        if (cmdHit || mapsPkg) score += 200;
+        logf("[hit] pid=%d score=%d unity=%d il2=%d anogs=%d %s", (int)pid, score, unity ? 1 : 0,
+             il2 ? 1 : 0, anogs ? 1 : 0, cmd[0] ? cmd : "(no cmdline)");
         if (!best.pid || score > best.score) {
             best.pid = pid;
             best.score = score;
@@ -588,13 +639,30 @@ void attach_tick() {
             best.anogs = anogs;
             std::snprintf(best.cmd, sizeof(best.cmd), "%s", cmd);
         }
+    };
+    while ((ent = readdir(d)) != nullptr) {
+        if (ent->d_name[0] < '1' || ent->d_name[0] > '9') continue;
+        pid_t pid = (pid_t)std::atoi(ent->d_name);
+        if (pid <= 0) continue;
+        ++visible;
+        consider(pid);
     }
     closedir(d);
 
+    if (best.score < 100) {
+        static int aux = 0;
+        if ((++aux % 4) == 1) {
+            pid_t extra = pid_from_cmd("pidof com.garena.game.codm");
+            if (!extra) extra = pid_from_cmd("su -c 'pidof com.garena.game.codm'");
+            if (extra) consider(extra);
+        }
+        if (g_hintPid) consider(g_hintPid);
+    }
+
     if (!best.pid) {
         attach_reset();
-        set_status("Waiting for CODM");
-        logf("[scan] no %s  visible=%d", kPkg, visible);
+        set_status("Waiting visible=%d maps=%d", visible, mapsOpened);
+        logf("[scan] no CODM  visible=%d maps=%d pkg=%s", visible, mapsOpened, kPkg);
         lock.store(0);
         return;
     }

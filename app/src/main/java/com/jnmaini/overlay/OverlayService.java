@@ -1,9 +1,12 @@
 package com.jnmaini.overlay;
 
+import android.app.ActivityManager;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.os.Build;
@@ -47,6 +50,7 @@ public class OverlayService extends Service {
                 state = NativeBridge.nativePollAttach();
             } catch (Throwable ignored) {
             }
+            noteRunning();
             if (state >= 2 && toastLevel < 2) {
                 toastLevel = 2;
                 Toast.makeText(OverlayService.this, R.string.toast_resolved, Toast.LENGTH_LONG).show();
@@ -59,6 +63,35 @@ public class OverlayService extends Service {
             main.postDelayed(this, 1000L);
         }
     };
+
+    public static void copyText(String text) {
+        final OverlayService svc = instance;
+        if (svc == null) return;
+        final String body = text == null ? "" : text;
+        svc.main.post(() -> {
+            ClipboardManager cm = (ClipboardManager) svc.getSystemService(CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(ClipData.newPlainText("jnmaini-log", body));
+            Toast.makeText(svc, "Logs copied", Toast.LENGTH_SHORT).show();
+        });
+    }
+
+    private void noteRunning() {
+        try {
+            ActivityManager am = (ActivityManager) getSystemService(ACTIVITY_SERVICE);
+            if (am == null) return;
+            java.util.List<ActivityManager.RunningAppProcessInfo> ps = am.getRunningAppProcesses();
+            if (ps == null) return;
+            for (ActivityManager.RunningAppProcessInfo p : ps) {
+                if (p == null || p.processName == null) continue;
+                String n = p.processName;
+                if (n.contains("codm") || n.contains("garena") || n.contains("callofduty")
+                        || n.contains("activision")) {
+                    NativeBridge.nativeHintProcess(p.pid, n);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
 
     @Override
     public void onCreate() {

@@ -13,4 +13,9 @@ public final class NativeBridge {
     public static native void nativeSetMenuOpen(boolean open);
     public static native boolean nativeIsMenuOpen();
     public static native int nativePollAttach();
+    public static native void nativeHintProcess(int pid, String name);
+
+    public static void copyText(String text) {
+        OverlayService.copyText(text);
+    }
 }
