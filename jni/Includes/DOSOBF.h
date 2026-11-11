@@ -10,6 +10,7 @@
 #include <type_traits>
 #include <cstring>
 #include <atomic>
+#include <new>
 
 #ifndef DOS_DEFAULT_KEY
 // default key: generated from line number and __COUNTER__ so repeated uses differ
@@ -172,7 +173,9 @@ namespace dos
             }
             secure_zero(m_plain, N);
             m_encrypted.store(true, std::memory_order_relaxed);
-            m_once = std::once_flag(); // allow decrypt again later
+            // once_flag is not assignable. Reconstruct it so decrypt can run again.
+            m_once.~once_flag();
+            ::new (static_cast<void*>(&m_once)) std::once_flag();
         }
 
     private:
