@@ -12,5 +12,5 @@ public final class NativeBridge {
     public static native void nativeTouch(int action, float x, float y);
     public static native void nativeSetMenuOpen(boolean open);
     public static native boolean nativeIsMenuOpen();
-    public static native boolean nativeIsReady();
+    public static native int nativePollAttach();
 }

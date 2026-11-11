@@ -21,8 +21,10 @@ public class MainActivity extends Activity {
         setContentView(R.layout.activity_main);
         Button overlay = findViewById(R.id.btnOverlay);
         Button start = findViewById(R.id.btnStart);
+        Button game = findViewById(R.id.btnGame);
         overlay.setOnClickListener(v -> openOverlaySettings());
         start.setOnClickListener(v -> tryStart());
+        game.setOnClickListener(v -> openCodm());
     }
 
     @Override
@@ -74,6 +76,20 @@ public class MainActivity extends Activity {
             moveTaskToBack(true);
         } catch (Throwable t) {
             Toast.makeText(this, t.getMessage() != null ? t.getMessage() : "Failed", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void openCodm() {
+        try {
+            Intent launch = getPackageManager().getLaunchIntentForPackage("com.garena.game.codm");
+            if (launch == null) {
+                Toast.makeText(this, "CODM is not installed", Toast.LENGTH_LONG).show();
+                return;
+            }
+            launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(launch);
+        } catch (Throwable t) {
+            Toast.makeText(this, "Cannot open CODM", Toast.LENGTH_SHORT).show();
         }
     }
 

@@ -1,5 +1,7 @@
 #include <string>
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <sstream>
 #include <chrono>
@@ -40,7 +42,8 @@ ImFont* LOGIN = nullptr;
 ImFont* F48 = nullptr;
 ImFont* Crozn = nullptr;
 static bool checked = false;
-static bool isToggled = false; 
+static bool isToggled = false;
+static const char *attach_status_text(); 
 
 void DrawAndTouch(ImTextureID textureID, ImVec2& position, float radius, int opacity, bool& isToggled) {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -184,9 +187,6 @@ if (!checkboxStates["HAND::CAM"])
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.f, 0.f, 0.f, 0.85f));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.f, 0.f, 0.f, 0.f));
 
-    static ImVec2 logoPos(24.f, 72.f);
-    static float logoDrag = 0.f;
-    ImGui::SetNextWindowPos(logoPos, ImGuiCond_Always);
     if (ImGui::Begin("LogoOverlay", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoScrollbar |
@@ -204,18 +204,10 @@ if (!checkboxStates["HAND::CAM"])
         float radius = size * 0.5f;
         ImVec2 pos = ImGui::GetCursorScreenPos();
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
-        ImGui::Dummy(ImVec2(size, size));
-        if (ImGui::IsWindowHovered() && ImGui::IsMouseDown(0)) {
-            ImVec2 delta = ImGui::GetIO().MouseDelta;
-            logoDrag += fabsf(delta.x) + fabsf(delta.y);
-            if (logoDrag > 6.f) {
-                logoPos.x += delta.x;
-                logoPos.y += delta.y;
-            }
-        }
-        if (ImGui::IsMouseReleased(0)) {
-            if (ImGui::IsWindowHovered() && logoDrag <= 6.f) isToggled = !isToggled;
-            logoDrag = 0.f;
+
+        
+        if (ImGui::InvisibleButton("logo_btn", ImVec2(size, size))) {
+            isToggled = !isToggled;
         }
 
         ImVec2 center(pos.x + radius, pos.y + radius);
@@ -244,9 +236,7 @@ if (!checkboxStates["HAND::CAM"])
         ImGui::Text("FPS %.0f", fps);
         ImGui::SetWindowFontScale(0.72f);
         ImGui::Text(DOS("ECLIPSE"));
-        const bool offsetsReady = Class_Camera_get_main != 0;
-        ImGui::TextColored(offsetsReady ? ImVec4(0.25f, 0.85f, 0.45f, 1.f) : ImVec4(0.95f, 0.78f, 0.25f, 1.f),
-                           offsetsReady ? "ready" : "waiting");
+        ImGui::Text("%s", attach_status_text());
         ImGui::SetWindowFontScale(1.0f);
         ImGui::EndGroup();
     }
@@ -270,11 +260,6 @@ ImGui::PushFont(Crozn);
 if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
 {
     DrawMacOSHeaderButtons();
-    {
-        const bool offsetsReady = Class_Camera_get_main != 0;
-        ImGui::TextColored(offsetsReady ? ImVec4(0.25f, 0.85f, 0.45f, 1.f) : ImVec4(0.95f, 0.78f, 0.25f, 1.f),
-                           offsetsReady ? "ready" : "waiting");
-    }
     ImGui::Dummy(ImVec2(0, 10));
     
     ImGui::BeginChild("##ScrollablePage", ImVec2(-1, -1), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
@@ -602,24 +587,116 @@ Java_com_jnmaini_overlay_NativeBridge_nativeIsMenuOpen(JNIEnv *, jclass) {
     return isToggled;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_jnmaini_overlay_NativeBridge_nativeIsReady(JNIEnv *, jclass) {
-    return Class_Camera_get_main != 0;
+
+
+static const char *kGamePackage = "com.garena.game.codm";
+static std::atomic<int> g_attachState{0};
+static std::atomic<int> g_attachLock{0};
+static pid_t g_gamePid = 0;
+static uintptr_t g_libanogs = 0;
+
+static const char *attach_status_text() {
+    switch (g_attachState.load()) {
+        case 2: return "Resolved";
+        case 1: return "CODM found";
+        default: return "Waiting for CODM";
+    }
 }
 
+static bool cmdline_has_pkg(pid_t pid, const char *pkg) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/cmdline", (int)pid);
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return false;
+    char buf[512];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, fp);
+    fclose(fp);
+    buf[n] = 0;
+    for (size_t i = 0; i < n; ++i) if (buf[i] == '\0') buf[i] = ' ';
+    return strstr(buf, pkg) != nullptr;
+}
 
-
-void Init_Thread(){
-    while (!m_Il2Cpp) {
-        m_Il2Cpp = getAbsoluteAddress("libunity.so", 0);  
-        sleep(1);      
+static pid_t find_game_pid() {
+    DIR *d = opendir("/proc");
+    if (!d) return 0;
+    pid_t found = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr) {
+        if (ent->d_name[0] < '1' || ent->d_name[0] > '9') continue;
+        pid_t pid = (pid_t)atoi(ent->d_name);
+        if (pid <= 0) continue;
+        if (!cmdline_has_pkg(pid, kGamePackage)) continue;
+        found = pid;
+        break;
     }
-    
-    INIT_OFFSETS();
-    hooking();
-    
-    DOSHOOK((void*)dlsym(RTLD_NEXT, DOS("eglSwapBuffers")), (void*)_eglSwapBuffers, (void**)&orig_eglSwapBuffers);
-    started = true;
+    closedir(d);
+    return found;
+}
+
+static uintptr_t map_base(pid_t pid, const char *lib) {
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
+    FILE *fp = fopen(path, "r");
+    if (!fp) return 0;
+    char line[512];
+    uintptr_t base = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, lib)) continue;
+        base = (uintptr_t)strtoull(line, nullptr, 16);
+        break;
+    }
+    fclose(fp);
+    return base;
+}
+
+static void attach_tick() {
+    if (g_attachLock.exchange(1)) return;
+    pid_t pid = find_game_pid();
+    if (!pid) {
+        g_gamePid = 0;
+        g_libanogs = 0;
+        if (!started) g_attachState.store(0);
+        g_attachLock.store(0);
+        return;
+    }
+    uintptr_t anogs = map_base(pid, "libanogs.so");
+    uintptr_t il2 = map_base(pid, "libil2cpp.so");
+    uintptr_t unity = map_base(pid, "libunity.so");
+    g_gamePid = pid;
+    g_libanogs = anogs;
+    if (!anogs || !il2 || !unity) {
+        if (!started) g_attachState.store(0);
+        g_attachLock.store(0);
+        return;
+    }
+    if (!started) g_attachState.store(1);
+    if (pid == getpid() && !started) {
+        m_Il2Cpp = unity;
+        INIT_OFFSETS();
+        hooking();
+        if (!orig_eglSwapBuffers) {
+            DOSHOOK((void *)dlsym(RTLD_NEXT, DOS("eglSwapBuffers")), (void *)_eglSwapBuffers, (void **)&orig_eglSwapBuffers);
+        }
+        if (Class_Camera_get_main) {
+            started = true;
+            g_attachState.store(2);
+        }
+    }
+    g_attachLock.store(0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativePollAttach(JNIEnv *, jclass) {
+    attach_tick();
+    return g_attachState.load();
+}
+
+void Init_Thread() {
+    for (;;) {
+        attach_tick();
+        if (started && g_attachState.load() == 2) break;
+        sleep(1);
+    }
 }
 
 __attribute__((constructor))
