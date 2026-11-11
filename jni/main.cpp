@@ -184,6 +184,9 @@ if (!checkboxStates["HAND::CAM"])
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.f, 0.f, 0.f, 0.85f));
     ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.f, 0.f, 0.f, 0.f));
 
+    static ImVec2 logoPos(24.f, 72.f);
+    static float logoDrag = 0.f;
+    ImGui::SetNextWindowPos(logoPos, ImGuiCond_Always);
     if (ImGui::Begin("LogoOverlay", nullptr,
         ImGuiWindowFlags_NoTitleBar |
         ImGuiWindowFlags_NoScrollbar |
@@ -201,10 +204,18 @@ if (!checkboxStates["HAND::CAM"])
         float radius = size * 0.5f;
         ImVec2 pos = ImGui::GetCursorScreenPos();
         ImDrawList* draw_list = ImGui::GetWindowDrawList();
-
-        
-        if (ImGui::InvisibleButton("logo_btn", ImVec2(size, size))) {
-            isToggled = !isToggled;
+        ImGui::Dummy(ImVec2(size, size));
+        if (ImGui::IsWindowHovered() && ImGui::IsMouseDown(0)) {
+            ImVec2 delta = ImGui::GetIO().MouseDelta;
+            logoDrag += fabsf(delta.x) + fabsf(delta.y);
+            if (logoDrag > 6.f) {
+                logoPos.x += delta.x;
+                logoPos.y += delta.y;
+            }
+        }
+        if (ImGui::IsMouseReleased(0)) {
+            if (ImGui::IsWindowHovered() && logoDrag <= 6.f) isToggled = !isToggled;
+            logoDrag = 0.f;
         }
 
         ImVec2 center(pos.x + radius, pos.y + radius);
@@ -233,6 +244,9 @@ if (!checkboxStates["HAND::CAM"])
         ImGui::Text("FPS %.0f", fps);
         ImGui::SetWindowFontScale(0.72f);
         ImGui::Text(DOS("ECLIPSE"));
+        const bool offsetsReady = Class_Camera_get_main != 0;
+        ImGui::TextColored(offsetsReady ? ImVec4(0.25f, 0.85f, 0.45f, 1.f) : ImVec4(0.95f, 0.78f, 0.25f, 1.f),
+                           offsetsReady ? "ready" : "waiting");
         ImGui::SetWindowFontScale(1.0f);
         ImGui::EndGroup();
     }
@@ -256,6 +270,11 @@ ImGui::PushFont(Crozn);
 if (ImGui::Begin(" ", nullptr, ImGuiWindowFlags_NoTitleBar))
 {
     DrawMacOSHeaderButtons();
+    {
+        const bool offsetsReady = Class_Camera_get_main != 0;
+        ImGui::TextColored(offsetsReady ? ImVec4(0.25f, 0.85f, 0.45f, 1.f) : ImVec4(0.95f, 0.78f, 0.25f, 1.f),
+                           offsetsReady ? "ready" : "waiting");
+    }
     ImGui::Dummy(ImVec2(0, 10));
     
     ImGui::BeginChild("##ScrollablePage", ImVec2(-1, -1), false, ImGuiWindowFlags_AlwaysVerticalScrollbar);
@@ -581,6 +600,11 @@ Java_com_jnmaini_overlay_NativeBridge_nativeSetMenuOpen(JNIEnv *, jclass, jboole
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_jnmaini_overlay_NativeBridge_nativeIsMenuOpen(JNIEnv *, jclass) {
     return isToggled;
+}
+
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_jnmaini_overlay_NativeBridge_nativeIsReady(JNIEnv *, jclass) {
+    return Class_Camera_get_main != 0;
 }
 
 

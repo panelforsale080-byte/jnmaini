@@ -7,12 +7,14 @@ import android.app.Service;
 import android.content.Intent;
 import android.graphics.PixelFormat;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.WindowManager;
-import android.widget.FrameLayout;
 import android.widget.TextView;
 
 public class OverlayService extends Service {
@@ -33,7 +35,27 @@ public class OverlayService extends Service {
     private GlMenuView glView;
     private TextView fab;
     private WindowManager.LayoutParams surfaceLp;
+    private WindowManager.LayoutParams fabLp;
     private boolean menuOpen = true;
+    private float fabDownRawX;
+    private float fabDownRawY;
+    private float fabLastRawX;
+    private float fabLastRawY;
+    private boolean fabDragging;
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final Runnable statusTick = new Runnable() {
+        @Override
+        public void run() {
+            if (fab == null) return;
+            boolean ready = false;
+            try {
+                ready = NativeBridge.nativeIsReady();
+            } catch (Throwable ignored) {
+            }
+            fab.setText(ready ? "JN  ready" : "JN  waiting");
+            main.postDelayed(this, 500);
+        }
+    };
 
     @Override
     public void onCreate() {
@@ -61,6 +83,7 @@ public class OverlayService extends Service {
         if (wm != null && fab != null) {
             try { wm.removeView(fab); } catch (Throwable ignored) {}
         }
+        main.removeCallbacks(statusTick);
         glView = null;
         fab = null;
         if (instance == this) instance = null;
@@ -120,25 +143,64 @@ public class OverlayService extends Service {
         wm.addView(glView, surfaceLp);
 
         fab = new TextView(this);
-        fab.setText("JN");
+        fab.setText("JN  waiting");
         fab.setTextColor(0xFFFFFFFF);
-        fab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        fab.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         fab.setGravity(Gravity.CENTER);
+        fab.setPadding(dp(14), 0, dp(14), 0);
         fab.setBackgroundResource(R.drawable.bg_fab);
-        int size = dp(56);
-        fab.setOnClickListener(v -> {
-            boolean open = !NativeBridge.nativeIsMenuOpen();
-            NativeBridge.nativeSetMenuOpen(open);
-            setMenuTouchable(open);
-        });
-        WindowManager.LayoutParams fabLp = new WindowManager.LayoutParams(
-                size, size, overlayType(),
+        fab.setOnTouchListener((v, event) -> onFabTouch(event));
+        fabLp = new WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                dp(56),
+                overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT);
         fabLp.gravity = Gravity.TOP | Gravity.START;
         fabLp.x = dp(16);
         fabLp.y = dp(48);
         wm.addView(fab, fabLp);
+        main.post(statusTick);
+    }
+
+    private boolean onFabTouch(MotionEvent event) {
+        if (fabLp == null || wm == null || fab == null) return false;
+        switch (event.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                fabDownRawX = fabLastRawX = event.getRawX();
+                fabDownRawY = fabLastRawY = event.getRawY();
+                fabDragging = false;
+                return true;
+            case MotionEvent.ACTION_MOVE: {
+                float dx = event.getRawX() - fabLastRawX;
+                float dy = event.getRawY() - fabLastRawY;
+                if (Math.hypot(event.getRawX() - fabDownRawX, event.getRawY() - fabDownRawY) > dp(6)) {
+                    fabDragging = true;
+                }
+                if (fabDragging) {
+                    fabLp.x += Math.round(dx);
+                    fabLp.y += Math.round(dy);
+                    try {
+                        wm.updateViewLayout(fab, fabLp);
+                    } catch (Throwable ignored) {
+                    }
+                }
+                fabLastRawX = event.getRawX();
+                fabLastRawY = event.getRawY();
+                return true;
+            }
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (!fabDragging) {
+                    boolean open = !NativeBridge.nativeIsMenuOpen();
+                    NativeBridge.nativeSetMenuOpen(open);
+                    setMenuTouchable(open);
+                }
+                fabDragging = false;
+                return true;
+            default:
+                return false;
+        }
     }
 
     private void setMenuTouchable(boolean open) {
