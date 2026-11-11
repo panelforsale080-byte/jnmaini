@@ -37,6 +37,7 @@ uintptr_t g_domainGet = 0;
 uintptr_t g_domain = 0;
 char g_libName[64] = {};
 bool g_scanned = false;
+int g_seenMods = -1;
 pid_t g_hintPid = 0;
 char g_hintCmd[180] = {};
 
@@ -505,11 +506,96 @@ static bool file_has_string(const char *path, const char *needle) {
     return found;
 }
 
-bool find_domain_get(pid_t pid, const std::vector<Mod> &mods, uintptr_t &addr, char *name, size_t nameCap) {
+bool scan_rx_elfs(pid_t pid, uintptr_t &addr, char *name, size_t nameCap) {
+    addr = 0;
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
+    FILE *fp = std::fopen(path, "r");
+    if (!fp) return false;
+    char line[768];
+    int elfs = 0;
+    int checked = 0;
+    while (std::fgets(line, sizeof(line), fp)) {
+        unsigned long start = 0, end = 0, off = 0;
+        char perms[8] = {};
+        char file[512] = {};
+        const int n = std::sscanf(line, "%lx-%lx %7s %lx %*s %*s %511[^\n]", &start, &end, perms, &off, file);
+        if (n < 4 || perms[0] != 'r' || off != 0) continue;
+        if (n >= 5 && std::strstr(file, ".so")) continue;
+        uint32_t mag = 0;
+        if (!mem_read(pid, (uintptr_t)start, &mag, sizeof(mag)) || mag != 0x464c457f) continue;
+        ++elfs;
+        uintptr_t sym = 0;
+        if (sym_from_dynamic(pid, (uintptr_t)start, "il2cpp_domain_get", sym) && sym) {
+            const char *tag = (n >= 5 && file[0]) ? file : "anon";
+            const char *base = std::strrchr(tag, '/');
+            base = base ? base + 1 : tag;
+            std::snprintf(name, nameCap, "%s", base);
+            addr = sym;
+            logf("[il2cpp] unpacked %s base=0x%lx domain_get=0x%llx", base, start,
+                 (unsigned long long)sym);
+            std::fclose(fp);
+            return true;
+        }
+        if (++checked >= 48) break;
+    }
+    std::fclose(fp);
+    if (elfs) logf("[il2cpp] unpacked elf regions=%d, no domain_get", elfs);
+    return false;
+}
+
+void log_disk_siblings(const std::vector<Mod> &mods) {
+    const char *unity = nullptr;
+    for (const Mod &m : mods) {
+        if (std::strstr(m.path, "libunity.so")) {
+            unity = m.path;
+            break;
+        }
+    }
+    if (!unity) return;
+    char dir[512];
+    std::snprintf(dir, sizeof(dir), "%s", unity);
+    char *slash = std::strrchr(dir, '/');
+    if (!slash) return;
+    *slash = 0;
+    DIR *d = opendir(dir);
+    if (!d) {
+        logf("[disk] cannot open %s", dir);
+        return;
+    }
+    int listed = 0;
+    struct dirent *ent;
+    while ((ent = readdir(d)) != nullptr) {
+        const char *nm = ent->d_name;
+        bool interesting = false;
+        for (const char *s = nm; *s && !interesting; ++s) {
+            const char *a = s;
+            const char *b = "il2cpp";
+            while (*a && *b && ((*a | 32) == (*b | 32))) {
+                ++a;
+                ++b;
+            }
+            if (!*b) interesting = true;
+        }
+        if (!interesting && !std::strstr(nm, "logic")) continue;
+        logf("[disk] %s/%s", dir, nm);
+        if (++listed >= 8) break;
+    }
+    if (!listed) logf("[disk] no libil2cpp next to libunity");
+    closedir(d);
+}
+
+bool find_domain_get(pid_t pid, const std::vector<Mod> &mods, uintptr_t &addr, char *name, size_t nameCap,
+                     bool verbose) {
     addr = 0;
     char listed[240] = "[mods]";
     size_t used = std::strlen(listed);
+    if (!verbose) {
+        listed[0] = 0;
+        used = 0;
+    }
     for (const Mod &m : mods) {
+        if (!verbose) break;
         const char *base = std::strrchr(m.path, '/');
         base = base ? base + 1 : m.path;
         const size_t n = std::strlen(base);
@@ -537,6 +623,7 @@ bool find_domain_get(pid_t pid, const std::vector<Mod> &mods, uintptr_t &addr, c
         }
     }
 
+    if (!verbose) return false;
     char hits[240] = {};
     size_t hused = 0;
     for (const Mod &m : mods) {
@@ -550,8 +637,9 @@ bool find_domain_get(pid_t pid, const std::vector<Mod> &mods, uintptr_t &addr, c
         hused += n;
         hits[hused] = 0;
     }
+    if (!verbose) return false;
     logf("[il2cpp] checked %zu modules, il2cpp_domain_get symbol missing", mods.size());
-    if (hits[0]) logf("[il2cpp] name string inside %s", hits);
+    if (hits[0]) logf("[il2cpp] name string only in %s (not the export)", hits);
     else logf("[il2cpp] name string not in any module file");
     return false;
 }
@@ -574,6 +662,7 @@ void attach_reset() {
     g_domain = 0;
     g_libName[0] = 0;
     g_scanned = false;
+    g_seenMods = -1;
     g_state.store(0);
 }
 
@@ -662,10 +751,22 @@ void attach_tick() {
         if (fp) {
             ++mapsOpened;
             char line[768];
+            auto has_ci = [](const char *s, const char *needle) {
+                for (; *s; ++s) {
+                    const char *a = s;
+                    const char *b = needle;
+                    while (*a && *b && ((*a | 32) == (*b | 32))) {
+                        ++a;
+                        ++b;
+                    }
+                    if (!*b) return true;
+                }
+                return false;
+            };
             while (std::fgets(line, sizeof(line), fp)) {
                 if (!unity && std::strstr(line, "libunity.so"))
                     unity = (uintptr_t)std::strtoull(line, nullptr, 16);
-                if (!il2 && std::strstr(line, "libil2cpp.so"))
+                if (!il2 && has_ci(line, "il2cpp"))
                     il2 = (uintptr_t)std::strtoull(line, nullptr, 16);
                 if (!anogs && std::strstr(line, "libanogs.so"))
                     anogs = (uintptr_t)std::strtoull(line, nullptr, 16);
@@ -730,6 +831,7 @@ void attach_tick() {
         g_domain = 0;
         g_libName[0] = 0;
         g_scanned = false;
+        g_seenMods = -1;
     }
     g_pid = best.pid;
     g_unity = best.unity;
@@ -745,7 +847,8 @@ void attach_tick() {
     else
         logf("[anogs] pid=%d not mapped yet", (int)best.pid);
 
-    if (!g_domainGet && (best.unity || best.il2) && !g_scanned) {
+    if (!g_domainGet && (best.unity || best.il2)) {
+        static int retry = 0;
         uintptr_t probeAt = best.il2 ? best.il2 : best.unity;
         uint8_t probe = 0;
         if (!mem_read(best.pid, probeAt, &probe, 1)) {
@@ -755,17 +858,24 @@ void attach_tick() {
             if (!collect_mods(best.pid, mods)) {
                 logf("[il2cpp] pid=%d maps unreadable errno=%d", (int)best.pid, errno);
             } else {
-                logf("[il2cpp] pid=%d modules=%zu", (int)best.pid, mods.size());
-                find_domain_get(best.pid, mods, g_domainGet, g_libName, sizeof(g_libName));
+                ++retry;
+                const bool verbose = g_seenMods != (int)mods.size();
+                if (verbose) {
+                    logf("[il2cpp] pid=%d modules=%zu", (int)best.pid, mods.size());
+                    find_domain_get(best.pid, mods, g_domainGet, g_libName, sizeof(g_libName), true);
+                    if (!g_domainGet) log_disk_siblings(mods);
+                    g_seenMods = (int)mods.size();
+                }
+                if (!g_domainGet && (verbose || (retry % 3) == 0))
+                    scan_rx_elfs(best.pid, g_domainGet, g_libName, sizeof(g_libName));
                 if (g_domainGet) {
                     if (domain_from_getter(best.pid, g_domainGet, g_domain))
                         logf("[il2cpp] domain=0x%llx", (unsigned long long)g_domain);
                     else
                         logf("[il2cpp] domain decode pending");
-                } else {
-                    logf("[il2cpp] il2cpp_domain_get not found");
+                } else if (verbose) {
+                    logf("[il2cpp] still waiting for libil2cpp to map");
                 }
-                g_scanned = true;
             }
         }
     } else if (!best.unity && !best.il2) {
@@ -775,12 +885,9 @@ void attach_tick() {
     if (g_domainGet) {
         g_state.store(2);
         set_status("Resolved %s pid %d", g_libName[0] ? g_libName : "il2cpp", (int)best.pid);
-    } else if (g_scanned) {
-        g_state.store(1);
-        set_status("CODM pid %d  il2cpp export missing", (int)best.pid);
     } else if (best.unity || best.il2) {
         g_state.store(1);
-        set_status("CODM pid %d  resolving il2cpp", (int)best.pid);
+        set_status("CODM pid %d  waiting for il2cpp", (int)best.pid);
     } else {
         g_state.store(1);
         set_status("CODM pid %d  libs not mapped", (int)best.pid);
