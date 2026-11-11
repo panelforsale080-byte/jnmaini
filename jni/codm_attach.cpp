@@ -166,10 +166,11 @@ struct Mod {
 int mod_score(const char *path) {
     const char *base = std::strrchr(path, '/');
     base = base ? base + 1 : path;
-    if (std::strstr(base, "il2cpp")) return 100;
-    if (std::strstr(base, "unity")) return 80;
-    if (std::strstr(base, "GameAssembly")) return 70;
-    return 10;
+    if (std::strstr(base, "il2cpp") || std::strstr(base, "Il2Cpp")) return 100;
+    if (std::strstr(base, "GameAssembly") || std::strstr(base, "GameCore") || std::strstr(base, "codm"))
+        return 90;
+    if (std::strstr(base, "unity") || std::strstr(base, "Unity")) return 40;
+    return 20;
 }
 
 bool collect_mods(pid_t pid, std::vector<Mod> &out) {
@@ -277,7 +278,10 @@ bool lookup_syms(const char *sym, const char *strData, size_t strSize, const Elf
         if (!s.st_name || s.st_name >= strSize || !s.st_value) continue;
         const int type = ELF64_ST_TYPE(s.st_info);
         if (type != STT_FUNC && type != STT_OBJECT && type != STT_NOTYPE) continue;
-        if (std::strcmp(strData + s.st_name, sym) != 0) continue;
+        const char *have = strData + s.st_name;
+        const size_t nlen = std::strlen(sym);
+        if (std::strncmp(have, sym, nlen) != 0) continue;
+        if (have[nlen] != '\0' && have[nlen] != '@') continue;
         addr = bias + (uintptr_t)s.st_value;
         return true;
     }
@@ -420,7 +424,7 @@ bool sym_from_file(const char *path, uintptr_t mapBase, const char *sym, uintptr
     uintptr_t minV = UINTPTR_MAX;
     for (int i = 0; i < eh.e_phnum; ++i)
         if (ph[i].p_type == PT_LOAD && ph[i].p_vaddr < minV) minV = (uintptr_t)ph[i].p_vaddr;
-    if (minV == UINTPTR_MAX || eh.e_shnum == 0 || eh.e_shnum > 256 || !eh.e_shoff) {
+    if (minV == UINTPTR_MAX || eh.e_shnum == 0 || eh.e_shnum > 4096 || !eh.e_shoff) {
         std::fclose(f);
         return false;
     }
@@ -447,54 +451,108 @@ bool sym_from_file(const char *path, uintptr_t mapBase, const char *sym, uintptr
     }
     const Elf64_Shdr *dynsym = nullptr;
     const Elf64_Shdr *dynstr = nullptr;
+    const Elf64_Shdr *symtab = nullptr;
+    const Elf64_Shdr *strtab = nullptr;
     for (const Elf64_Shdr &s : sh) {
         if (s.sh_name >= names.size()) continue;
         const char *nm = names.data() + s.sh_name;
         if (std::strcmp(nm, ".dynsym") == 0) dynsym = &s;
-        if (std::strcmp(nm, ".dynstr") == 0) dynstr = &s;
+        else if (std::strcmp(nm, ".dynstr") == 0) dynstr = &s;
+        else if (std::strcmp(nm, ".symtab") == 0) symtab = &s;
+        else if (std::strcmp(nm, ".strtab") == 0) strtab = &s;
     }
-    if (!dynsym || !dynstr || dynsym->sh_entsize != sizeof(Elf64_Sym) || !dynstr->sh_size ||
-        dynstr->sh_size > 32u * 1024u * 1024u || dynsym->sh_size > 32u * 1024u * 1024u) {
-        std::fclose(f);
-        return false;
-    }
-    std::vector<char> str(dynstr->sh_size);
-    std::vector<Elf64_Sym> syms(dynsym->sh_size / sizeof(Elf64_Sym));
-    bool ok = std::fseek(f, (long)dynstr->sh_offset, SEEK_SET) == 0 &&
-              std::fread(str.data(), 1, str.size(), f) == str.size() &&
-              std::fseek(f, (long)dynsym->sh_offset, SEEK_SET) == 0 &&
-              std::fread(syms.data(), sizeof(Elf64_Sym), syms.size(), f) == syms.size() &&
-              lookup_syms(sym, str.data(), str.size(), syms.data(), syms.size(), bias, addr);
+    auto try_table = [&](const Elf64_Shdr *symsh, const Elf64_Shdr *strsh) -> bool {
+        if (!symsh || !strsh || symsh->sh_entsize != sizeof(Elf64_Sym)) return false;
+        if (!strsh->sh_size || strsh->sh_size > 48u * 1024u * 1024u) return false;
+        if (!symsh->sh_size || symsh->sh_size > 48u * 1024u * 1024u) return false;
+        std::vector<char> str(strsh->sh_size);
+        std::vector<Elf64_Sym> syms(symsh->sh_size / sizeof(Elf64_Sym));
+        if (std::fseek(f, (long)strsh->sh_offset, SEEK_SET) != 0) return false;
+        if (std::fread(str.data(), 1, str.size(), f) != str.size()) return false;
+        if (std::fseek(f, (long)symsh->sh_offset, SEEK_SET) != 0) return false;
+        if (std::fread(syms.data(), sizeof(Elf64_Sym), syms.size(), f) != syms.size()) return false;
+        return lookup_syms(sym, str.data(), str.size(), syms.data(), syms.size(), bias, addr);
+    };
+    const bool ok = try_table(dynsym, dynstr) || try_table(symtab, strtab);
     std::fclose(f);
     return ok;
 }
 
+static bool file_has_string(const char *path, const char *needle) {
+    FILE *f = std::fopen(path, "rb");
+    if (!f || !needle || !needle[0]) {
+        if (f) std::fclose(f);
+        return false;
+    }
+    const size_t nlen = std::strlen(needle);
+    char buf[4096 + 80];
+    size_t keep = 0;
+    bool found = false;
+    while (!found) {
+        const size_t n = std::fread(buf + keep, 1, 4096, f);
+        if (!n) break;
+        const size_t total = keep + n;
+        for (size_t i = 0; i + nlen <= total; ++i) {
+            if (std::memcmp(buf + i, needle, nlen) == 0) {
+                found = true;
+                break;
+            }
+        }
+        keep = nlen > 1 && total >= nlen ? nlen - 1 : total;
+        if (keep) std::memmove(buf, buf + total - keep, keep);
+    }
+    std::fclose(f);
+    return found;
+}
+
 bool find_domain_get(pid_t pid, const std::vector<Mod> &mods, uintptr_t &addr, char *name, size_t nameCap) {
     addr = 0;
-    int tried = 0;
+    char listed[240] = "[mods]";
+    size_t used = std::strlen(listed);
     for (const Mod &m : mods) {
-        if (m.score < 70 && tried > 0) break;
-        ++tried;
         const char *base = std::strrchr(m.path, '/');
         base = base ? base + 1 : m.path;
-        errno = 0;
-        if (sym_from_file(m.path, m.base, "il2cpp_domain_get", addr)) {
-            std::snprintf(name, nameCap, "%s", base);
-            logf("[il2cpp] file %s base=0x%llx domain_get=0x%llx", base,
-                 (unsigned long long)m.base, (unsigned long long)addr);
-            return true;
+        const size_t n = std::strlen(base);
+        if (used + n + 2 >= sizeof(listed)) {
+            logf("%s", listed);
+            used = 0;
+            listed[0] = 0;
         }
-        const int fileErr = errno;
-        errno = 0;
-        if (sym_from_dynamic(pid, m.base, "il2cpp_domain_get", addr)) {
-            std::snprintf(name, nameCap, "%s", base);
-            logf("[il2cpp] dynsym %s base=0x%llx domain_get=0x%llx", base,
-                 (unsigned long long)m.base, (unsigned long long)addr);
-            return true;
-        }
-        logf("[il2cpp] no export in %s file=%d read=%d", base, fileErr, errno);
-        if (tried >= 4) break;
+        listed[used++] = ' ';
+        std::memcpy(listed + used, base, n);
+        used += n;
+        listed[used] = 0;
     }
+    if (listed[0]) logf("%s", listed);
+
+    for (const Mod &m : mods) {
+        const char *base = std::strrchr(m.path, '/');
+        base = base ? base + 1 : m.path;
+        if (sym_from_file(m.path, m.base, "il2cpp_domain_get", addr) ||
+            sym_from_dynamic(pid, m.base, "il2cpp_domain_get", addr)) {
+            std::snprintf(name, nameCap, "%s", base);
+            logf("[il2cpp] %s base=0x%llx domain_get=0x%llx", base,
+                 (unsigned long long)m.base, (unsigned long long)addr);
+            return true;
+        }
+    }
+
+    char hits[240] = {};
+    size_t hused = 0;
+    for (const Mod &m : mods) {
+        const char *base = std::strrchr(m.path, '/');
+        base = base ? base + 1 : m.path;
+        if (!file_has_string(m.path, "il2cpp_domain_get")) continue;
+        const size_t n = std::strlen(base);
+        if (hused + n + 2 >= sizeof(hits)) break;
+        if (hused) hits[hused++] = ' ';
+        std::memcpy(hits + hused, base, n);
+        hused += n;
+        hits[hused] = 0;
+    }
+    logf("[il2cpp] checked %zu modules, il2cpp_domain_get symbol missing", mods.size());
+    if (hits[0]) logf("[il2cpp] name string inside %s", hits);
+    else logf("[il2cpp] name string not in any module file");
     return false;
 }
 
