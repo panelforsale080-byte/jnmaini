@@ -666,6 +666,105 @@ void attach_reset() {
     g_state.store(0);
 }
 
+uintptr_t find_root_domain(pid_t pid) {
+    const char *needle = "IL2CPP Root Domain";
+    const size_t nlen = std::strlen(needle);
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
+    FILE *fp = std::fopen(path, "r");
+    if (!fp) return 0;
+    uintptr_t strAt = 0;
+    char chunk[65536 + 64];
+    logf("[il2cpp] scanning libunity for IL2CPP Root Domain");
+    char line[768];
+    while (!strAt && std::fgets(line, sizeof(line), fp)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {};
+        char file[512] = {};
+        file[0] = 0;
+        if (std::sscanf(line, "%lx-%lx %7s %*s %*s %*s %511[^\n]", &start, &end, perms, file) < 3)
+            continue;
+        if (perms[0] != 'r' || end <= start) continue;
+        if (!std::strstr(file, "libunity.so") && !std::strstr(line, "il2cpp")) continue;
+        size_t keep = 0;
+        for (uintptr_t addr = (uintptr_t)start; addr < (uintptr_t)end;) {
+            size_t n = (uintptr_t)end - addr;
+            if (n > 65536) n = 65536;
+            if (!mem_read(pid, addr, chunk + keep, n)) break;
+            const size_t total = keep + n;
+            bool found = false;
+            size_t at = 0;
+            if (total >= nlen) {
+                for (size_t i = 0; i + nlen <= total; ++i) {
+                    if (std::memcmp(chunk + i, needle, nlen) == 0) {
+                        found = true;
+                        at = i;
+                        break;
+                    }
+                }
+            }
+            if (found) {
+                strAt = addr - keep + at;
+                break;
+            }
+            keep = nlen > 1 ? nlen - 1 : 0;
+            if (keep && total >= keep) std::memmove(chunk, chunk + total - keep, keep);
+            addr += n;
+        }
+    }
+    if (!strAt) {
+        std::fclose(fp);
+        logf("[il2cpp] IL2CPP Root Domain not in libunity");
+        return 0;
+    }
+    logf("[il2cpp] root name @ 0x%llx", (unsigned long long)strAt);
+    std::rewind(fp);
+    uintptr_t hits[8] = {};
+    int nhits = 0;
+    while (nhits < 8 && std::fgets(line, sizeof(line), fp)) {
+        unsigned long start = 0, end = 0;
+        char perms[8] = {};
+        char file[512] = {};
+        file[0] = 0;
+        if (std::sscanf(line, "%lx-%lx %7s %*s %*s %*s %511[^\n]", &start, &end, perms, file) < 3)
+            continue;
+        if (perms[0] != 'r' || perms[1] != 'w' || !std::strstr(file, "libunity.so")) continue;
+        for (uintptr_t addr = (uintptr_t)start; addr + 8 <= (uintptr_t)end && nhits < 8;) {
+            size_t n = (uintptr_t)end - addr;
+            if (n > 65536) n = 65536;
+            n &= ~7u;
+            if (n < 8) break;
+            if (!mem_read(pid, addr, chunk, n)) break;
+            for (size_t i = 0; i + 8 <= n && nhits < 8; i += 8) {
+                uintptr_t val = 0;
+                std::memcpy(&val, chunk + i, 8);
+                if (val == strAt) hits[nhits++] = addr + i;
+            }
+            addr += n;
+        }
+    }
+    std::fclose(fp);
+    const int offs[] = {0x18, 0x10, 0x20, 0x8, 0x28};
+    for (int h = 0; h < nhits; ++h) {
+        for (int off : offs) {
+            if (hits[h] < (uintptr_t)off) continue;
+            uintptr_t dom = hits[h] - (uintptr_t)off;
+            if (dom & 7) continue;
+            uintptr_t words[6] = {};
+            if (!mem_read(pid, dom, words, sizeof(words))) continue;
+            if (words[off / 8] != strAt) continue;
+            int ptrs = 0;
+            for (uintptr_t w : words)
+                if (mem_ptr_ok(w)) ++ptrs;
+            if (ptrs < 2) continue;
+            logf("[il2cpp] domain=0x%llx friendly+%#x", (unsigned long long)dom, off);
+            return dom;
+        }
+    }
+    logf("[il2cpp] root name found, domain object not found (%d ptrs)", nhits);
+    return 0;
+}
+
 } // namespace
 
 const char *attach_status_text() {
@@ -766,15 +865,23 @@ void attach_tick() {
             while (std::fgets(line, sizeof(line), fp)) {
                 if (!unity && std::strstr(line, "libunity.so"))
                     unity = (uintptr_t)std::strtoull(line, nullptr, 16);
-                if (!il2 && has_ci(line, "il2cpp"))
-                    il2 = (uintptr_t)std::strtoull(line, nullptr, 16);
+                if (has_ci(line, "il2cpp")) {
+                    char show[200];
+                    std::snprintf(show, sizeof(show), "%s", line);
+                    for (char *p = show; *p; ++p)
+                        if (*p == '\n' || *p == '\r') *p = 0;
+                    logf("[map] %s", show);
+                    if (!il2 && (std::strstr(line, ".so") || std::strstr(line, "memfd")))
+                        il2 = (uintptr_t)std::strtoull(line, nullptr, 16);
+                }
                 if (!anogs && std::strstr(line, "libanogs.so"))
                     anogs = (uintptr_t)std::strtoull(line, nullptr, 16);
                 if (std::strstr(line, kPkg)) mapsPkg = true;
             }
             std::fclose(fp);
         }
-        if (!cmdHit && !mapsPkg && !anogs && !(unity && il2)) {
+        if (cmd[0] && !cmdHit && !unity && !anogs && !il2) return;
+        if (!cmdHit && !mapsPkg && !anogs && !unity && !il2) {
             if (samples < 6 && cmd[0] && (std::strstr(cmd, "game") || std::strstr(cmd, "unity") ||
                                           std::strstr(cmd, "garena") || std::strstr(cmd, "cod"))) {
                 logf("[proc] pid=%d %s", (int)pid, cmd);
@@ -787,7 +894,7 @@ void attach_tick() {
         if (il2) score += 100;
         if (unity) score += 50;
         if (anogs) score += 40;
-        if (cmdHit || mapsPkg) score += 200;
+        if (cmdHit) score += 200;
         logf("[hit] pid=%d score=%d unity=%d il2=%d anogs=%d %s", (int)pid, score, unity ? 1 : 0,
              il2 ? 1 : 0, anogs ? 1 : 0, cmd[0] ? cmd : "(no cmdline)");
         if (!best.pid || score > best.score) {
@@ -866,23 +973,30 @@ void attach_tick() {
                     if (!g_domainGet) log_disk_siblings(mods);
                     g_seenMods = (int)mods.size();
                 }
-                if (!g_domainGet && (verbose || (retry % 3) == 0))
+                if (!g_domainGet && !g_domain && (verbose || (retry % 3) == 0))
                     scan_rx_elfs(best.pid, g_domainGet, g_libName, sizeof(g_libName));
                 if (g_domainGet) {
                     if (domain_from_getter(best.pid, g_domainGet, g_domain))
                         logf("[il2cpp] domain=0x%llx", (unsigned long long)g_domain);
                     else
                         logf("[il2cpp] domain decode pending");
-                } else if (verbose) {
-                    logf("[il2cpp] still waiting for libil2cpp to map");
                 }
+                if (!g_domain && !g_domainGet && verbose) {
+                    uintptr_t dom = find_root_domain(best.pid);
+                    if (dom) {
+                        g_domain = dom;
+                        std::snprintf(g_libName, sizeof(g_libName), "libunity.so");
+                    }
+                }
+                if (!g_domain && !g_domainGet && verbose)
+                    logf("[il2cpp] still waiting for libil2cpp to map");
             }
         }
     } else if (!best.unity && !best.il2) {
         logf("[il2cpp] pid=%d waiting for libunity/libil2cpp", (int)best.pid);
     }
 
-    if (g_domainGet) {
+    if (g_domain || g_domainGet) {
         g_state.store(2);
         set_status("Resolved %s pid %d", g_libName[0] ? g_libName : "il2cpp", (int)best.pid);
     } else if (best.unity || best.il2) {
