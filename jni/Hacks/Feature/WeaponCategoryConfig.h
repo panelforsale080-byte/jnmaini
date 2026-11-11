@@ -1,9 +1,7 @@
 #pragma once
 /*
- * Per-category settings — 1 offset only (in CLASS.h):
- *   FastOffsets::offset_Inventory_get_CategoryName = 0xC36358C
- * LocalPawn + CurrentWeapon come from FastFuncs (espoffset).
- * FloatMap returns float& so std::clamp works without editing DrawESP.
+ * Per-category settings. Inventory.get_CategoryName is resolved by name
+ * in espoffset(). FloatMap returns float& so std::clamp works.
  */
 #include <array>
 #include <cstdint>

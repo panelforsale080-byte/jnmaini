@@ -4,98 +4,152 @@
 #include "ImGui/imgui.h"
 #include "ImGui/CLASS.h"
 
+/* UnityEngine.HumanBodyBones values from Dump 1.6.59. These are enum ids, not memory offsets. */
 enum BoneIndex : int {
-    HEAD, NECK, BODY, HIPS,
-    LEFT_UPPER_ARM, LEFT_ARM, LEFT_HAND,
-    RIGHT_UPPER_ARM, RIGHT_ARM, RIGHT_HAND,
-    LEFT_PAHA, LEFT_BETIS, LEFT_TOE,
-    RIGHT_PAHA, RIGHT_BETIS, RIGHT_TOE,
+    HIPS, SPINE, CHEST, NECK, HEAD,
+    L_SHOULDER, L_UPPER, L_LOWER, L_HAND,
+    R_SHOULDER, R_UPPER, R_LOWER, R_HAND,
+    L_UPPER_LEG, L_LOWER_LEG, L_FOOT,
+    R_UPPER_LEG, R_LOWER_LEG, R_FOOT,
     BONE_COUNT
 };
 
-static uintptr_t BoneOffsets[BONE_COUNT];
+static constexpr int kHumanBone[BONE_COUNT] = {
+    0, 7, 8, 9, 10,
+    11, 13, 15, 17,
+    12, 14, 16, 18,
+    1, 3, 5,
+    2, 4, 6
+};
 
 static constexpr int BoneConnections[][2] = {
-    {HEAD, NECK}, {NECK, BODY}, {BODY, HIPS},
-    {NECK, LEFT_UPPER_ARM}, {LEFT_UPPER_ARM, LEFT_ARM}, {LEFT_ARM, LEFT_HAND},
-    {NECK, RIGHT_UPPER_ARM}, {RIGHT_UPPER_ARM, RIGHT_ARM}, {RIGHT_ARM, RIGHT_HAND},
-    {HIPS, LEFT_PAHA}, {LEFT_PAHA, LEFT_BETIS}, {LEFT_BETIS, LEFT_TOE},
-    {HIPS, RIGHT_PAHA}, {RIGHT_PAHA, RIGHT_BETIS}, {RIGHT_BETIS, RIGHT_TOE}
+    {HEAD, NECK}, {NECK, CHEST}, {CHEST, SPINE}, {SPINE, HIPS},
+    {NECK, L_SHOULDER}, {L_SHOULDER, L_UPPER}, {L_UPPER, L_LOWER}, {L_LOWER, L_HAND},
+    {NECK, R_SHOULDER}, {R_SHOULDER, R_UPPER}, {R_UPPER, R_LOWER}, {R_LOWER, R_HAND},
+    {HIPS, L_UPPER_LEG}, {L_UPPER_LEG, L_LOWER_LEG}, {L_LOWER_LEG, L_FOOT},
+    {HIPS, R_UPPER_LEG}, {R_UPPER_LEG, R_LOWER_LEG}, {R_LOWER_LEG, R_FOOT}
 };
 static constexpr int BoneConnectionCount = sizeof(BoneConnections) / sizeof(BoneConnections[0]);
-
-static inline void InitBoneOffsets() {
-    static bool init = false;
-    if (init) return;
-    BoneOffsets[HEAD] = FastOffsets::BoneMap_m_Head;
-    BoneOffsets[NECK] = FastOffsets::BoneMap_m_Neck;
-    BoneOffsets[BODY] = FastOffsets::BoneMap_m_Body;
-    BoneOffsets[HIPS] = FastOffsets::BoneMap_m_Hips;
-    BoneOffsets[LEFT_UPPER_ARM] = FastOffsets::BoneMap_m_LeftUpperArm;
-    BoneOffsets[LEFT_ARM] = FastOffsets::BoneMap_m_LeftArm;
-    BoneOffsets[LEFT_HAND] = FastOffsets::BoneMap_m_LeftHand;
-    BoneOffsets[RIGHT_UPPER_ARM] = FastOffsets::BoneMap_m_RightUpperArm;
-    BoneOffsets[RIGHT_ARM] = FastOffsets::BoneMap_m_RightArm;
-    BoneOffsets[RIGHT_HAND] = FastOffsets::BoneMap_m_RightHand;
-    BoneOffsets[LEFT_PAHA] = FastOffsets::BoneMap_m_LeftPaha;
-    BoneOffsets[LEFT_BETIS] = FastOffsets::BoneMap_m_LeftBetis;
-    BoneOffsets[LEFT_TOE] = FastOffsets::BoneMap_m_LeftToe;
-    BoneOffsets[RIGHT_PAHA] = FastOffsets::BoneMap_m_RightPaha;
-    BoneOffsets[RIGHT_BETIS] = FastOffsets::BoneMap_m_RightBetis;
-    BoneOffsets[RIGHT_TOE] = FastOffsets::BoneMap_m_RightToe;
-    init = true;
-}
 
 static inline bool IsValidAddress(uintptr_t address) {
     return (address > 0x10000 && address < 0x7FFFFFFFFFFF);
 }
 
-static inline uintptr_t SafeReadU64(uintptr_t address) {
-    if (!IsValidAddress(address)) return 0;
-    return *reinterpret_cast<uintptr_t*>(address);
+struct BoneApi {
+    void *(*getComponent)(void *, Il2CppString *);
+    Transform *(*getBone)(void *, int);
+    Il2CppString *animatorName;
+    uintptr_t head;
+    uintptr_t neck;
+    uintptr_t spine;
+    uintptr_t hips;
+    uintptr_t leftAnkle;
+    uintptr_t rightAnkle;
+    uintptr_t modelRoot;
+    bool ready;
+};
+
+static inline BoneApi &bone_api() {
+    static BoneApi api{};
+    if (api.ready) return api;
+    api.ready = true;
+    const char *unity[] = {"UnityEngine.CoreModule.dll", "UnityEngine.dll", nullptr};
+    const char *stringNames[] = {"System.String", "string", nullptr};
+    for (int i = 0; unity[i]; ++i) {
+        if (!api.getComponent) {
+            for (int n = 0; stringNames[n]; ++n) {
+                char *args[] = {const_cast<char *>(stringNames[n])};
+                api.getComponent = (void *(*)(void *, Il2CppString *))Il2CppGetMethodOffset(
+                    unity[i], "UnityEngine", "Component", "GetComponent", args, 1);
+                if (api.getComponent) break;
+            }
+        }
+        if (!api.getBone)
+            api.getBone = (Transform *(*)(void *, int))Il2CppGetMethodOffset(
+                unity[i], "UnityEngine", "Animator", "GetBoneTransform", 1);
+    }
+    if (api.getComponent)
+        api.animatorName = Il2CppString::Create("Animator");
+
+    auto field = [](const char *cls, const char *name) -> uintptr_t {
+        size_t off = Il2CppGetFieldOffset("Assembly-CSharp.dll", "GameBase", cls, name);
+        if (off == (size_t)-1 || off >= 0x4000) return 0;
+        return (uintptr_t)off;
+    };
+    api.head = field("Pawn", "m_HeadBone");
+    api.modelRoot = field("Pawn", "m_ModelRoot");
+    api.neck = field("PlayerPawn", "m_NeckBone");
+    api.spine = field("PlayerPawn", "m_SpineBone");
+    api.hips = field("PlayerPawn", "m_HipsBone");
+    api.leftAnkle = field("PlayerPawn", "m_LeftAnkleBone");
+    api.rightAnkle = field("PlayerPawn", "m_RightAnkleBone");
+    return api;
 }
 
-static inline Vector3 GetBonePosition(uintptr_t boneMap, uintptr_t boneOffset) {
-    uintptr_t table = SafeReadU64(boneMap + Class_Pawn_m_BoneTable);
-    if (!IsValidAddress(table)) return Vector3::zero();
-    uintptr_t boneNode = SafeReadU64(table + boneOffset);
-    if (!IsValidAddress(boneNode)) return Vector3::zero();
-    uintptr_t boneTransform = SafeReadU64(boneNode + Class_Pawn_m_BoneNode);
-    if (!IsValidAddress(boneTransform)) return Vector3::zero();
+static inline Transform *ReadTransformField(void *object, uintptr_t offset) {
+    if (!object || !offset) return nullptr;
+    uintptr_t slot = reinterpret_cast<uintptr_t>(object) + offset;
+    if (!IsValidAddress(slot)) return nullptr;
+    uintptr_t value = *reinterpret_cast<uintptr_t *>(slot);
+    if (!IsValidAddress(value)) return nullptr;
+    return reinterpret_cast<Transform *>(value);
+}
+
+static inline Vector3 TransformWorld(Transform *transform) {
+    if (!transform) return Vector3::zero();
     if (FastFuncs::Transform_get_position_Fast)
-        return FastFuncs::Transform_get_position_Fast(reinterpret_cast<Transform*>(boneTransform));
-    return reinterpret_cast<Transform*>(boneTransform)->get_position();
+        return FastFuncs::Transform_get_position_Fast(transform);
+    return transform->get_position();
 }
 
-/* Pass cam + scrH from frame cache — no Camera::get_main() per skeleton */
-static inline void DrawSkeleton(ImDrawList* draw, Pawn* pawn, Camera* cam, float scrH) {
+static inline void *FindAnimator(Pawn *pawn) {
+    BoneApi &api = bone_api();
+    if (!api.getComponent || !api.animatorName || !pawn) return nullptr;
+    Transform *mesh = pawn->m_Mesh();
+    if (mesh) {
+        void *animator = api.getComponent(mesh, api.animatorName);
+        if (animator) return animator;
+    }
+    Transform *root = ReadTransformField(pawn, api.modelRoot);
+    if (root) return api.getComponent(root, api.animatorName);
+    return nullptr;
+}
+
+static inline void DrawSkeleton(ImDrawList *draw, Pawn *pawn, Camera *cam, float scrH) {
     if (!draw || !pawn || !cam || scrH <= 0.f) return;
     if (!pawn->m_IsAlive()) return;
 
-    InitBoneOffsets();
-
-    uintptr_t pawnAddr = reinterpret_cast<uintptr_t>(pawn);
-    if (!IsValidAddress(pawnAddr)) return;
-
-    uintptr_t boneMap = SafeReadU64(pawnAddr + Class_Pawn_m_BoneMappings);
-    if (!IsValidAddress(boneMap)) return;
-
-    auto w2s = FastFuncs::WorldToScreen_Fast;
-
+    BoneApi &api = bone_api();
     Vector3 screen[BONE_COUNT];
     bool valid[BONE_COUNT] = {};
     int validCount = 0;
+    auto w2s = FastFuncs::WorldToScreen_Fast;
 
-    for (int i = 0; i < BONE_COUNT; i++) {
-        Vector3 world = GetBonePosition(boneMap, BoneOffsets[i]);
-        if (world.x == 0.f && world.y == 0.f && world.z == 0.f) continue;
+    auto accept = [&](int index, Vector3 world) {
+        if (world.x == 0.f && world.y == 0.f && world.z == 0.f) return;
         Vector3 sc = w2s ? w2s(cam, world) : cam->WorldToScreenPoint(world);
-        if (sc.z <= 0.05f) continue;
-        screen[i] = sc;
-        valid[i] = true;
+        if (sc.z <= 0.05f) return;
+        screen[index] = sc;
+        valid[index] = true;
         validCount++;
+    };
+
+    void *animator = FindAnimator(pawn);
+    if (animator && api.getBone) {
+        for (int i = 0; i < BONE_COUNT; i++)
+            accept(i, TransformWorld(api.getBone(animator, kHumanBone[i])));
     }
-    if (validCount < 3) return;
+    if (validCount < 3) {
+        validCount = 0;
+        for (int i = 0; i < BONE_COUNT; i++) valid[i] = false;
+        accept(HEAD, TransformWorld(ReadTransformField(pawn, api.head)));
+        accept(NECK, TransformWorld(ReadTransformField(pawn, api.neck)));
+        accept(SPINE, TransformWorld(ReadTransformField(pawn, api.spine)));
+        accept(HIPS, TransformWorld(ReadTransformField(pawn, api.hips)));
+        accept(L_FOOT, TransformWorld(ReadTransformField(pawn, api.leftAnkle)));
+        accept(R_FOOT, TransformWorld(ReadTransformField(pawn, api.rightAnkle)));
+    }
+    if (validCount < 2) return;
 
     ImVec4 col = colorStates["DEFAULT"];
     ImU32 color = IM_COL32((int)(col.x * 255), (int)(col.y * 255), (int)(col.z * 255), (int)(col.w * 255));
@@ -113,9 +167,8 @@ static inline void DrawSkeleton(ImDrawList* draw, Pawn* pawn, Camera* cam, float
     }
 }
 
-/* Back-compat overload */
-static inline void DrawSkeleton(ImDrawList* draw, Pawn* pawn) {
-    Camera* cam = FastFuncs::Camera_get_main_Fast ? FastFuncs::Camera_get_main_Fast() : Camera::get_main();
+static inline void DrawSkeleton(ImDrawList *draw, Pawn *pawn) {
+    Camera *cam = FastFuncs::Camera_get_main_Fast ? FastFuncs::Camera_get_main_Fast() : Camera::get_main();
     float h = ImGui::GetIO().DisplaySize.y;
     DrawSkeleton(draw, pawn, cam, h);
 }

@@ -28,8 +28,6 @@
 #include "tools/things.h"
 #include "ImGui/widgets.hpp"
 #include "ImGui/Iconcpp.h"
-#include "ImGui/stb_image.h"
-#include "ImGui/LOGONIDOS.h"
 #include "Hacks/Hacks.h"
 #include "Hacks/Feature/WeaponCategoryConfig.h"
 
@@ -37,41 +35,11 @@
 static CustomWidgets g_widgets;
 
 
-struct TextureInfo { 
-    ImTextureID textureId; 
-    int w, h; 
-};
-
-TextureInfo LogoNew;
 ImFont* LOGIN = nullptr;
 ImFont* F48 = nullptr;
 ImFont* Crozn = nullptr;
 static bool checked = false;
 static bool isToggled = false; 
-
-TextureInfo CreateTexture(const unsigned char* buf, int len) {
-    TextureInfo image = {0,0,0};
-    int channels;
-    unsigned char* data = stbi_load_from_memory(buf, len, &image.w, &image.h, &channels, 4);
-    if (!data) return image;
-    
-    GLuint tex;
-    glGenTextures(1, &tex);
-    glBindTexture(GL_TEXTURE_2D, tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, image.w, image.h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    stbi_image_free(data);
-    
-    image.textureId = (ImTextureID)(uintptr_t)tex;
-    return image;
-}
-
-void InitTexture() { 
-    LogoNew = CreateTexture(dos_data, sizeof(dos_data)); 
-}
 
 void DrawAndTouch(ImTextureID textureID, ImVec2& position, float radius, int opacity, bool& isToggled) {
     ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -166,7 +134,6 @@ if (!g_Initialized) {
     ImGui_ImplAndroid_Init();
     ImGui_ImplOpenGL3_Init("#version 300 es");
 
-    InitTexture();
 ImFontConfig font_cfg;
 font_cfg.SizePixels = 20.0f;
 LOGIN = io.Fonts->AddFontDefault(&font_cfg);
@@ -238,15 +205,12 @@ if (!checkboxStates["HAND::CAM"])
             isToggled = !isToggled;
         }
 
-        draw_list->AddImageRounded(
-            (void*)(intptr_t)LogoNew.textureId,
-            pos,
-            ImVec2(pos.x + size, pos.y + size),
-            ImVec2(0, 0),
-            ImVec2(1, 1),
-            IM_COL32_WHITE,
-            radius
-        );
+        ImVec2 center(pos.x + radius, pos.y + radius);
+        draw_list->AddCircleFilled(center, radius, IM_COL32(32, 32, 36, 255));
+        draw_list->AddCircle(center, radius, IM_COL32(220, 220, 220, 255), 32, 1.6f);
+        const char *mark = "JN";
+        ImVec2 markSize = ImGui::CalcTextSize(mark);
+        draw_list->AddText(ImVec2(center.x - markSize.x * 0.5f, center.y - markSize.y * 0.5f), IM_COL32_WHITE, mark);
 
         // Diagonal line
         float lineStartX = pos.x + size + 4.0f;

@@ -58,11 +58,6 @@ uintptr_t Class_Pawn_m_PlayerInfo;
 uintptr_t Class_PlayerInfo_m_VestValue;
 uintptr_t Class_PlayerInfo_m_VestMaxValue;
 
-uintptr_t Class_Pawn_m_BoneMappings;
-uintptr_t Class_Pawn_m_BoneTable;
-uintptr_t Class_Pawn_m_BoneNode;
-
-
 uintptr_t Pawn_get_CurrentWeapon;
 uintptr_t Inventory_get_CategoryName;
 // ------------------- Forward Declarations -------------------

@@ -6,28 +6,6 @@
 
 typedef unsigned long long ulong;
 
-uintptr_t get_off(const char* str) {
-    return std::stoul(str, nullptr, 16);
-}
-// Add DOS version
-#define GET_OFF(offset) get_off(DOS(offset))
-
-#define BYPASS(offset) do { \
-    void *dummy; \
-DOSHOOK((void*)(libanogs_base + GET_OFF(offset)), (void*)hook_bypass, &dummy); \
-} while(0)
-
-#define PATCH(offset) do { \
-    uintptr_t target = libanogs_base + GET_OFF(offset); \
-    size_t page = sysconf(_SC_PAGESIZE); \
-    uintptr_t start = target & ~(page - 1); \
-    mprotect((void*)start, page, PROT_READ | PROT_WRITE | PROT_EXEC); \
-    *(uint32_t*)target = 0xD2800000; \
-    *(uint32_t*)(target + 4) = 0xD65F03C0; \
-    mprotect((void*)start, page, PROT_READ | PROT_EXEC); \
-    __builtin___clear_cache((char*)start, (char*)(start + page)); \
-} while(0)
-
 struct CSLobby_Offline_Ntf {
     int reason;  // offset 0x18
     int type;    // offset 0x1C  
@@ -48,10 +26,34 @@ auto DOSHOOK = [](void *target, void *replace, void **backup) {
 };
 
 
-static uintptr_t libanogs_base = 0;
-static uintptr_t libunity_base = 0;
-
 #include "Hacks/Feature/WeaponCategoryConfig.h"
+#include "ANOGS/Il2Cpp.h"
+
+static const char *kGameImages[] = {"Assembly-CSharp.dll", nullptr};
+static const char *kUnityImages[] = {"UnityEngine.CoreModule.dll", "UnityEngine.dll", nullptr};
+
+static void *find_method(const char *const *images, const char *ns, const char *cls, const char *name, int argc) {
+    for (int i = 0; images && images[i]; ++i) {
+        void *fn = Il2CppGetMethodOffset(images[i], ns, cls, name, argc);
+        if (fn) return fn;
+    }
+    return nullptr;
+}
+
+static void hook_method(const char *const *images, const char *ns, const char *cls, const char *name, int argc, void *replace, void **backup) {
+    void *fn = find_method(images, ns, cls, name, argc);
+    if (fn) DOSHOOK(fn, replace, backup);
+}
+
+static size_t find_field(const char *ns, const char *cls, const char *name) {
+    size_t off = Il2CppGetFieldOffset("Assembly-CSharp.dll", ns, cls, name);
+    if (off == (size_t)-1 || off >= 0x4000) return (size_t)-1;
+    return off;
+}
+
+static size_t s_finishCountdownOff = (size_t)-1;
+static size_t s_skillActiveOff = (size_t)-1;
+static void (*s_showFreeView)(void *, bool) = nullptr;
 
 // ================= OFFSET ENCRYPTION =================
 
@@ -347,11 +349,6 @@ static float hook_get_m_PhysSkisMaxSpeed(void* instance) {
 }
 
 
-int hook_bypass(){
-return 0;
-}
-
-
 //FPSHIGH
 static int (*orig_GetFrameRateValue)(void* instance, int fl, int mode) = nullptr;
 static int hook_GetFrameRateValue(void* instance, int fl, int mode) {
@@ -371,8 +368,8 @@ static void h_OnReSpawnPlayer(void *instance, Vector3 serverSyncPos) {
     if (o_OnReSpawnPlayer) {
         o_OnReSpawnPlayer(instance, serverSyncPos);
     }
-    if (instance && checkboxStates["WALLHACK"]) {
-        ((void (*)(void *, bool))(libunity_base + GET_OFF("0x5565680")))(instance, true);
+    if (instance && checkboxStates["WALLHACK"] && s_showFreeView) {
+        s_showFreeView(instance, true);
     }
 }
 
@@ -388,10 +385,10 @@ static void (*orig_Tick)(void* instance, float deltaTime);
 static void hook_Tick(void* instance, float deltaTime) {
     if (instance != NULL) {
         float slider = seekbarValues["FAST::LOOT"];
-        if (slider >= 99.0f) {
-            float* finishCountdown = (float*)((uintptr_t)instance + 0x40);
+        if (slider >= 99.0f && s_finishCountdownOff != (size_t)-1) {
+            float* finishCountdown = (float*)((uintptr_t)instance + s_finishCountdownOff);
             if (*finishCountdown > 0.0f) {
-                *finishCountdown = 0.0f; // Force instant completion
+                *finishCountdown = 0.0f;
             }
         }
     }
@@ -444,7 +441,8 @@ static void hook_IllusionTick(void* instance, float dt) {
         return;
     }
     
-    *(bool*)((uintptr_t)instance + 0x41) = true;
+    if (s_skillActiveOff != (size_t)-1)
+        *(bool*)((uintptr_t)instance + s_skillActiveOff) = true;
     g_IllusionForced = true;
 }
 
@@ -461,104 +459,46 @@ static bool hook_GetUseVulkanVRS(void* instance) {
 
 
 static void hooking() {
-    static bool init = false; 
-    if (init) return; 
+    static bool init = false;
+    if (init) return;
+    if (!Il2CppIsAssembliesLoaded()) return;
     init = true;
-   
-    if (libanogs_base == 0) {
-        libanogs_base = getAbsoluteAddress(DOS("libanogs.so"), 0); 
-    }
-    if (libunity_base == 0) {
-        libunity_base = getAbsoluteAddress(DOS("libunity.so"), 0); 
-    }
 
-BYPASS("0x204218");  // crash fixer
-BYPASS("0x45B334");  //ban data
-BYPASS("0x44A714");  // CRC 
-BYPASS("0x48F964");  // kill 7 callers
+    s_finishCountdownOff = find_field("", "SimpleInteractionComponent", "_finishCountdown");
+    s_skillActiveOff = find_field("GameEngine", "IllusionSkillPawnComponent", "bSkillActive");
+    s_showFreeView = (void (*)(void *, bool))find_method(
+        kGameImages, "GameBase", "PlayerPawn", "ShowFreeViewOcclustionEffect", 1);
 
-//FEATURES
-
-DOSHOOK((void*)(libunity_base + GET_OFF("0x8058220")), (void*)hook_IllusionTick, (void**)&orig_IllusionTick);  // MISDIRECTION
-//ANTIKICK //public class GameUIScene : UIScene
-DOSHOOK((void*)(libunity_base + GET_OFF("0x73669C4")), (void*)hooked_GameUIScene_OnKickOff, (void**)&orig_GameUIScene_OnKickOff);
-//ANTIKICK
-
-
-//FAST LOOT
-DOSHOOK((void*)(libunity_base + GET_OFF("0xA7EAB18")), (void*)hook_Tick, (void**)&orig_Tick);
-
-// No Crouch
-DOSHOOK((void*)(libunity_base + GET_OFF("0x66B882C")), (void*)hook_CheckCrouch, (void**)&orig_CheckCrouch);
-
-//speedhack
-DOSHOOK((void*)(libunity_base + GET_OFF("0x530EF10")), (void*)hooked_get_deltaTime, (void**)&orig_get_deltaTime);
-DOSHOOK((void*)(libunity_base + GET_OFF("0x534D8E4")), (void*)hooked_get_fixedDeltaTime, (void**)&orig_get_fixedDeltaTime);
-
-// Wallhack
-DOSHOOK((void*)(libunity_base + GET_OFF("0x53D2114")), (void*)&h_OnReSpawnPlayer, (void**)&o_OnReSpawnPlayer);
-
-// FPS
-DOSHOOK((void*)(libunity_base + GET_OFF("0xAFAC73C")), (void*)hook_GetFrameRateValue, (void**)&orig_GetFrameRateValue);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xAFAB394")), (void*)&hooked_SetUltraFrameRateDeviceInfo, (void**)&orig_SetUltraFrameRateDeviceInfo);
-
-// Snowboard Speed
-DOSHOOK((void*)(libunity_base + GET_OFF("0x53FE7FC")), (void*)hook_get_m_PhysSkisMaxSpeed, (void**)&orig_get_m_PhysSkisMaxSpeed);
-
-// FOV
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC0B472C")), (void*)hook_GetMaxFov_3p, (void**)&orig_GetMaxFov_3p);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC0B4458")), (void*)hook_GetMaxFov_1p, (void**)&orig_GetMaxFov_1p);
-
-// Fast Swim
-DOSHOOK((void*)(libunity_base + GET_OFF("0x5597B14")), (void*)hook_CalcSwimmingSpeedScale, (void**)&orig_CalcSwimmingSpeedScale);
-
-// Graphics
-DOSHOOK((void*)(libunity_base + GET_OFF("0xAFAD9D4")), (void*)hook_SetEnableVSync, (void**)&orig_SetEnableVSync);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xAFB9F44")), (void*)hook_get_EnableVulkan, (void**)&orig_get_EnableVulkan);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xAFBA068")), (void*)hook_ShouldCurDeviceEnableVK, (void**)&orig_ShouldCurDeviceEnableVK);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xAFBA18C")), (void*)hook_set_EnableVulkan, (void**)&orig_set_EnableVulkan);
-
-
-    DOSHOOK((void*)(libunity_base + 0xAFB9F44), (void*)hook_GetEnableVulkan, (void**)&orig_GetEnableVulkan);
-    DOSHOOK((void*)(libunity_base + 0x59BE2E0), (void*)hook_GetUseVulkanVRS, (void**)&orig_GetUseVulkanVRS);
-
-
-// No Parachute
-DOSHOOK((void*)(libunity_base + GET_OFF("0x5A88C48")), (void*)hook_OpenParachute, (void**)&orig_OpenParachute);
-/*
-//Fast scope
-DOSHOOK((void*)(libunity_base + GET_OFF("0x5474160")), (void*)hook_get_AimingTime, (void**)&orig_get_AimingTime);
-DOSHOOK((void*)(libunity_base + GET_OFF("0x54B8198")), (void*)hook_OpenAim, (void**)&orig_OpenAim);
-DOSHOOK((void*)(libunity_base + GET_OFF("0x54B900C")), (void*)hook_CloseAim, (void**)&orig_CloseAim);
-DOSHOOK((void*)(libunity_base + GET_OFF("0x54F60A4")), (void*)hook_get_IsAiming, (void**)&orig_get_IsAiming);
-*/
-// Aim Assist
-DOSHOOK((void*)(libunity_base + GET_OFF("0x54F0E64")), (void*)&newaim1, (void**)&new_aim1);
-DOSHOOK((void*)(libunity_base + GET_OFF("0x66BD5E8")), (void*)&newaim2, (void**)&new_aim2);
-
-// Skip Tutorial
-DOSHOOK((void*)(libunity_base + GET_OFF("0xCCC3240")), (void*)&hook_IsTutorialEnabled, (void**)&orig_IsTutorialEnabled);
-
-// Advance UAV
-DOSHOOK((void*)(libunity_base + GET_OFF("0x6AE9A70")), (void*)&hook_get_AdvanceUAVEnabled, (void**)&orig_get_AdvanceUAVEnabled);
-
-
-DOSHOOK((void*)(libunity_base + GET_OFF("0xD535A6C")), (void*)hook_GetScaleRecoil, (void**)&orig_GetScaleRecoil);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xD5359E4")), (void*)hook_GetPunchAngle, (void**)&orig_GetPunchAngle);
-
-// No Reload
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC2B5B58")), (void*)hook_get_ChangeClipTime, (void**)&orig_get_ChangeClipTime);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC2B5D88")), (void*)hook_get_ChangeClipStartTime, (void**)&orig_get_ChangeClipStartTime);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC2B5F90")), (void*)hook_get_ChangeClipEndTime, (void**)&orig_get_ChangeClipEndTime);
-
-// No Spread
-DOSHOOK((void*)(libunity_base + GET_OFF("0xD53408C")), (void*)hook_GetRealSpreadModifier, (void**)&orig_GetRealSpreadModifier);
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC2BDF40")), (void*)hook_GetShotSpread, (void**)&orig_GetShotSpread);
-
-// No Shake
-DOSHOOK((void*)(libunity_base + GET_OFF("0x669780C")), (void*)&hook_UpdateCameraShake, (void**)&orig_UpdateCameraShake);
-
-// Hitbox
-DOSHOOK((void*)(libunity_base + GET_OFF("0xC2BE0C8")), (void*)&hook_SingleLineCheckPhysics, (void**)&orig_SingleLineCheckPhysics);
-
+    hook_method(kGameImages, "GameEngine", "IllusionSkillPawnComponent", "Tick", 1, (void *)hook_IllusionTick, (void **)&orig_IllusionTick);
+    hook_method(kGameImages, "GameBase", "GameUIScene", "OnKickOff", 1, (void *)hooked_GameUIScene_OnKickOff, (void **)&orig_GameUIScene_OnKickOff);
+    hook_method(kGameImages, "", "SimpleInteractionComponent", "Tick", 1, (void *)hook_Tick, (void **)&orig_Tick);
+    hook_method(kGameImages, "GameEngine", "PlayerController", "CheckCrouch", 0, (void *)hook_CheckCrouch, (void **)&orig_CheckCrouch);
+    hook_method(kUnityImages, "UnityEngine", "Time", "get_deltaTime", 0, (void *)hooked_get_deltaTime, (void **)&orig_get_deltaTime);
+    hook_method(kUnityImages, "UnityEngine", "Time", "get_fixedDeltaTime", 0, (void *)hooked_get_fixedDeltaTime, (void **)&orig_get_fixedDeltaTime);
+    hook_method(kGameImages, "GameBase", "Pawn", "OnReSpawnPlayer", 1, (void *)&h_OnReSpawnPlayer, (void **)&o_OnReSpawnPlayer);
+    hook_method(kGameImages, "GameEngine", "SystemSetting", "GetFrameRateValue", 2, (void *)hook_GetFrameRateValue, (void **)&orig_GetFrameRateValue);
+    hook_method(kGameImages, "GameEngine", "SystemSetting", "SetUltraFrameRateDeviceInfo", 5, (void *)&hooked_SetUltraFrameRateDeviceInfo, (void **)&orig_SetUltraFrameRateDeviceInfo);
+    hook_method(kGameImages, "GameBase", "Pawn", "get_m_PhysSkisMaxSpeed", 0, (void *)hook_get_m_PhysSkisMaxSpeed, (void **)&orig_get_m_PhysSkisMaxSpeed);
+    hook_method(kGameImages, "GameEngine", "InputSettingConfig", "GetMaxFov_3p", 0, (void *)hook_GetMaxFov_3p, (void **)&orig_GetMaxFov_3p);
+    hook_method(kGameImages, "GameEngine", "InputSettingConfig", "GetMaxFov_1p", 0, (void *)hook_GetMaxFov_1p, (void **)&orig_GetMaxFov_1p);
+    hook_method(kGameImages, "GameBase", "PlayerPawn", "CalcSwimmingSpeedScale", 0, (void *)hook_CalcSwimmingSpeedScale, (void **)&orig_CalcSwimmingSpeedScale);
+    hook_method(kGameImages, "GameEngine", "SystemSetting", "SetEnableVSync", 0, (void *)hook_SetEnableVSync, (void **)&orig_SetEnableVSync);
+    hook_method(kGameImages, "GameEngine", "SystemSetting", "ShouldCurDeviceEnableVK", 0, (void *)hook_ShouldCurDeviceEnableVK, (void **)&orig_ShouldCurDeviceEnableVK);
+    hook_method(kGameImages, "GameEngine", "SystemSetting", "set_EnableVulkan", 1, (void *)hook_set_EnableVulkan, (void **)&orig_set_EnableVulkan);
+    hook_method(kGameImages, "GameEngine", "SystemSetting", "get_EnableVulkan", 0, (void *)hook_GetEnableVulkan, (void **)&orig_GetEnableVulkan);
+    hook_method(kGameImages, "", "CODPostEffectChain", "get_UseVulkanVRS", 0, (void *)hook_GetUseVulkanVRS, (void **)&orig_GetUseVulkanVRS);
+    hook_method(kGameImages, "OpenWorld", "SkydivingPhysics", "OpenParachute", 1, (void *)hook_OpenParachute, (void **)&orig_OpenParachute);
+    hook_method(kGameImages, "GameBase", "Weapon", "GetAutoAssistAimRate", 5, (void *)&newaim1, (void **)&new_aim1);
+    hook_method(kGameImages, "GameEngine", "PlayerController", "GetRotateSpeed", 5, (void *)&newaim2, (void **)&new_aim2);
+    hook_method(kGameImages, "Tutorial", "TutorialManager", "IsTutorialEnabled", 0, (void *)&hook_IsTutorialEnabled, (void **)&orig_IsTutorialEnabled);
+    hook_method(kGameImages, "GameEngine", "GameInfo", "get_AdvanceUAVEnabled", 0, (void *)&hook_get_AdvanceUAVEnabled, (void **)&orig_get_AdvanceUAVEnabled);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent_Instant", "GetScaleRecoil", 0, (void *)hook_GetScaleRecoil, (void **)&orig_GetScaleRecoil);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent_Instant", "GetPunchAngle", 0, (void *)hook_GetPunchAngle, (void **)&orig_GetPunchAngle);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent", "get_ChangeClipTime", 0, (void *)hook_get_ChangeClipTime, (void **)&orig_get_ChangeClipTime);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent", "get_ChangeClipStartTime", 0, (void *)hook_get_ChangeClipStartTime, (void **)&orig_get_ChangeClipStartTime);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent", "get_ChangeClipEndTime", 0, (void *)hook_get_ChangeClipEndTime, (void **)&orig_get_ChangeClipEndTime);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent_Instant", "GetRealSpreadModifier", 0, (void *)hook_GetRealSpreadModifier, (void **)&orig_GetRealSpreadModifier);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent", "GetShotSpread", 0, (void *)hook_GetShotSpread, (void **)&orig_GetShotSpread);
+    hook_method(kGameImages, "GameEngine", "PlayerCamera", "UpdateCameraShake", 0, (void *)&hook_UpdateCameraShake, (void **)&orig_UpdateCameraShake);
+    hook_method(kGameImages, "GameEngine", "WeaponFireComponent", "SingleLineCheckPhysics", 6, (void *)&hook_SingleLineCheckPhysics, (void **)&orig_SingleLineCheckPhysics);
 }

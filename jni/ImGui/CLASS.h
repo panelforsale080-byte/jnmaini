@@ -5,32 +5,7 @@
 #include "ANOGS/Il2Cpp.h"
 #include "Includes/DOSOBF.h"
 #include "Hacks/StructGame/GameClass.h"
-#ifndef GET_OFF
-#define GET_OFF(offset) get_off(offset)
-#endif
 bool started = false;
-namespace FastOffsets {
-/* Skeleton bone chain. Dump 1.6.59 has no field named m_BoneMappings. */
-static const uintptr_t BoneMap_m_BoneMappings = 0xA8;
-static const uintptr_t BoneMap_m_BoneTable = 0x10;
-static const uintptr_t BoneMap_m_BoneNode = 0x40;
-static const uintptr_t BoneMap_m_Head = 0x70;
-static const uintptr_t BoneMap_m_Neck = 0x90;
-static const uintptr_t BoneMap_m_Body = 0x98;
-static const uintptr_t BoneMap_m_Hips = 0x50;
-static const uintptr_t BoneMap_m_LeftUpperArm = 0x68;
-static const uintptr_t BoneMap_m_LeftArm = 0x60;
-static const uintptr_t BoneMap_m_LeftHand = 0x58;
-static const uintptr_t BoneMap_m_RightUpperArm = 0x88;
-static const uintptr_t BoneMap_m_RightArm = 0x80;
-static const uintptr_t BoneMap_m_RightHand = 0x78;
-static const uintptr_t BoneMap_m_LeftPaha = 0x30;
-static const uintptr_t BoneMap_m_LeftBetis = 0x28;
-static const uintptr_t BoneMap_m_LeftToe = 0x20;
-static const uintptr_t BoneMap_m_RightPaha = 0x48;
-static const uintptr_t BoneMap_m_RightBetis = 0x40;
-static const uintptr_t BoneMap_m_RightToe = 0x38;
-}
 
 
 extern uintptr_t Class_Camera_get_main;
@@ -70,9 +45,6 @@ extern uintptr_t Class_AttackableTarget_PlayerState;
 extern uintptr_t Class_Pawn_m_PlayerInfo;
 extern uintptr_t Class_PlayerInfo_m_VestValue;
 extern uintptr_t Class_PlayerInfo_m_VestMaxValue;
-extern uintptr_t Class_Pawn_m_BoneMappings;
-extern uintptr_t Class_Pawn_m_BoneTable;
-extern uintptr_t Class_Pawn_m_BoneNode;
 extern uintptr_t Pawn_get_CurrentWeapon;
 extern uintptr_t Inventory_get_CategoryName;
 extern uintptr_t Weapon_GetWeaponId;
@@ -205,10 +177,6 @@ inline void espoffset() {
     Class_PlayerInfo_m_VestMaxValue = gf("GameEngine", "PlayerInfo", "m_VestMaxValue");
     Class_BaseGame__m_AllVehicles = gf("GameBase", "BaseGame", "m_AllVehicles");
     Class_BaseGame_EnemyPawns = gf("GameBase", "BaseGame", "EnemyPawns");
-
-    Class_Pawn_m_BoneMappings = FastOffsets::BoneMap_m_BoneMappings;
-    Class_Pawn_m_BoneTable = FastOffsets::BoneMap_m_BoneTable;
-    Class_Pawn_m_BoneNode = FastOffsets::BoneMap_m_BoneNode;
 
     FastFuncs::Camera_get_main_Fast = (Camera* (*)())Class_Camera_get_main;
     FastFuncs::WorldToScreen_Fast = (Vector3 (*)(Camera*, Vector3))Class_Camera_WorldToScreenPoint;
