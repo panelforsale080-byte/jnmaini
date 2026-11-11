@@ -1,4 +1,5 @@
 #include "codm_attach.h"
+#include "codm_esp.h"
 
 #include <atomic>
 #include <cstdarg>
@@ -981,6 +982,7 @@ void attach_tick() {
     }
 
     if (!best.pid) {
+        codm_esp_reset();
         attach_reset();
         set_status("Waiting visible=%d maps=%d", visible, mapsOpened);
         logf("[scan] no CODM  visible=%d maps=%d pkg=%s", visible, mapsOpened, kPkg);
@@ -988,22 +990,25 @@ void attach_tick() {
         return;
     }
 
-    if (best.pid != g_pid || best.unity != g_unity || best.il2 != g_il2) {
+    const bool pickChanged = best.pid != g_pid || best.unity != g_unity || best.il2 != g_il2;
+    if (pickChanged) {
         g_domainGet = 0;
         g_domain = 0;
         g_libName[0] = 0;
         g_scanned = false;
         g_seenMods = -1;
         g_unityIl2 = false;
+        codm_esp_reset();
     }
     g_pid = best.pid;
     g_unity = best.unity;
     g_il2 = best.il2;
     g_anogs = best.anogs;
     g_state.store(g_domainGet ? 2 : 1);
-    logf("[scan] visible=%d matched=%d pick=%d unity=%d il2=%d anogs=%d %s", visible, matched,
-         (int)best.pid, best.unity ? 1 : 0, best.il2 ? 1 : 0, best.anogs ? 1 : 0,
-         best.cmd[0] ? best.cmd : "(no cmdline)");
+    if (pickChanged)
+        logf("[scan] visible=%d matched=%d pick=%d unity=%d il2=%d anogs=%d %s", visible, matched,
+             (int)best.pid, best.unity ? 1 : 0, best.il2 ? 1 : 0, best.anogs ? 1 : 0,
+             best.cmd[0] ? best.cmd : "(no cmdline)");
     set_status("CODM pid %d", (int)best.pid);
     if (g_anogs)
         logf("[anogs] pid=%d base=0x%llx", (int)best.pid, (unsigned long long)g_anogs);
@@ -1071,5 +1076,6 @@ void attach_tick() {
         g_state.store(1);
         set_status("CODM pid %d  libs not mapped", (int)best.pid);
     }
+    if (best.unity) codm_esp_resolve(best.pid);
     lock.store(0);
 }

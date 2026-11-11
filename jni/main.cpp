@@ -34,6 +34,7 @@
 #include "Hacks/Hacks.h"
 #include "Hacks/Feature/WeaponCategoryConfig.h"
 #include "codm_attach.h"
+#include "codm_esp.h"
 
 
 static CustomWidgets g_widgets;
@@ -173,6 +174,19 @@ if (gameTouch) ImGui_GetTouch(io, get_height());
 ImGui_ImplOpenGL3_NewFrame();
 ImGui_ImplAndroid_NewFrame(glWidth, glHeight);
 ImGui::NewFrame();
+{
+    static bool hookNote = false;
+    if (!hookNote && (checkboxStates["AIMBOT 360"] || checkboxStates["WALLHACK"] || checkboxStates["ADVANCE::UAV"] ||
+                      checkboxStates["NO::PARACHUTE"] || checkboxStates["FAST::SWIM"] || checkboxStates["HITBOX"] ||
+                      checkboxStates["NO::SHAKE"] || checkboxStates["NO CROUCH"] || checkboxStates["AUTO::MISDIRECTION"])) {
+        hookNote = true;
+        attach_log_line("[esp] combat toggles need the game process. the overlay draws lines and boxes");
+    }
+}
+codm_esp_draw(ImGui::GetBackgroundDrawList(), glWidth, glHeight, checkboxStates["ESP ENABLE"],
+              checkboxStates["ESP LINE"], checkboxStates["ESP BOX"] || checkboxStates["3D::BOX"],
+              checkboxStates["ESP NAME"], checkboxStates["ESP HEALTH"], checkboxStates["ESP DISTANCE"],
+              checkboxStates["ENEMY::COUNTER"]);
 if (started) DrawESP(ImGui::GetBackgroundDrawList());
 
 
