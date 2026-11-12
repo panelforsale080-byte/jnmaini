@@ -321,6 +321,36 @@ bool collect_ranges(pid_t pid, std::vector<Range> &out, int &unityN, int &metaN)
     return !out.empty();
 }
 
+uintptr_t unity_file_base(pid_t pid) {
+    char path[64];
+    std::snprintf(path, sizeof(path), "/proc/%d/maps", (int)pid);
+    FILE *fp = std::fopen(path, "r");
+    if (!fp) return 0;
+    char line[768];
+    uintptr_t base = 0;
+    while (std::fgets(line, sizeof(line), fp)) {
+        unsigned long start = 0, off = 0;
+        char file[512] = {};
+        if (std::sscanf(line, "%lx-%*x %*s %lx %*s %*s %511[^\n]", &start, &off, file) < 3) continue;
+        if (!std::strstr(file, "libunity.so")) continue;
+        if (off == 0) {
+            base = (uintptr_t)start;
+            break;
+        }
+    }
+    std::fclose(fp);
+    return base;
+}
+
+uintptr_t follow_b(pid_t pid, uintptr_t func) {
+    uint32_t w = 0;
+    if (!func || !mem_read(pid, func, &w, sizeof(w))) return func;
+    if ((w & 0xFC000000u) != 0x14000000u) return func;
+    int32_t imm = (int32_t)(w & 0x03FFFFFFu);
+    if (imm & 0x02000000) imm |= ~0x03FFFFFF;
+    return func + (uintptr_t)(imm * 4);
+}
+
 void search_strings(pid_t pid, const std::vector<Range> &ranges, std::vector<StrKey> &keys) {
     int found[kNeedles] = {};
     std::vector<uint8_t> buf(65536 + 48);
@@ -660,6 +690,43 @@ void codm_esp_resolve(pid_t pid) {
     next.headOff = field_off(pid, hits[N_HEAD_F], kPawn, 4, "m_HeadPosition");
     if (next.headOff < 0) next.headOff = method_vec(pid, ranges, hits[N_HEAD_M], "Pawn");
     next.nameOff = method_ptr_off(pid, ranges, hits[N_NAME_M], "Pawn");
+    if (!next.matchSlot || !next.camSlot || next.enemyOff < 0 || next.posOff < 0) {
+        const uintptr_t base = unity_file_base(pid);
+        const uintptr_t matchFn = base + 0x801191C;
+        const uintptr_t localFn = base + 0x8012814;
+        const uintptr_t camFn = base + 0x52D5CDC;
+        const uintptr_t posFn = base + 0x538AABC;
+        const uintptr_t headFn = base + 0x538A478;
+        if (base && in_exec(ranges, matchFn)) {
+            elog("[esp] libunity base=0x%llx using dump addresses", (unsigned long long)base);
+            auto slot_from = [&](uintptr_t fn, const char *label) -> uintptr_t {
+                uintptr_t slot = 0;
+                const uintptr_t body = follow_b(pid, fn);
+                if (!decode_static_slot(pid, body, slot)) {
+                    log_code(pid, label, body);
+                    return 0;
+                }
+                uintptr_t probe = 0;
+                mem_read(pid, slot, &probe, sizeof(probe));
+                if (probe && !ptr_ok(probe)) return 0;
+                elog("[esp] %s slot=0x%llx", label, (unsigned long long)slot);
+                return slot;
+            };
+            if (!next.matchSlot) next.matchSlot = slot_from(matchFn, "get_MatchGame");
+            if (!next.localSlot) next.localSlot = slot_from(localFn, "get_LocalPawn");
+            if (!next.camSlot) next.camSlot = slot_from(camFn, "Camera.get_main");
+            if (next.posOff < 0) next.posOff = decode_vec3(pid, follow_b(pid, posFn));
+            if (next.headOff < 0) next.headOff = decode_vec3(pid, follow_b(pid, headFn));
+            if (next.enemyOff < 0) next.enemyOff = 0x178;
+            if (next.aliveOff < 0) next.aliveOff = 0x550;
+            if (next.botOff < 0) next.botOff = 0x5C1;
+            if (next.infoOff < 0) next.infoOff = 0x78;
+            if (next.hpOff < 0) next.hpOff = 0x34;
+            if (next.maxOff < 0) next.maxOff = 0x38;
+        } else {
+            elog("[esp] libunity base missing for dump addresses");
+        }
+    }
     next.attempts = (next.matchSlot || !hits[N_MATCH].empty()) ? 3 : attempt;
     next.ready = next.matchSlot && next.camSlot && next.enemyOff > 0 && next.posOff > 0;
     if (next.ready)
