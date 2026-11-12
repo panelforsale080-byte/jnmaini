@@ -174,15 +174,41 @@ bool in_exec(const std::vector<Range> &ranges, uintptr_t p) {
     return false;
 }
 
+int tbnz_skip(uint32_t w) {
+    if ((w & 0x7F000000u) != 0x37000000u) return 0;
+    int32_t imm14 = (int32_t)((w >> 5) & 0x3FFFu);
+    if (imm14 & 0x2000) imm14 |= ~0x3FFF;
+    if (imm14 <= 0 || imm14 > 48) return 0;
+    return imm14;
+}
+
 bool decode_static_slot(pid_t pid, uintptr_t func, uintptr_t &slot) {
     slot = 0;
-    uint32_t ins[32] = {};
+    uint32_t ins[64] = {};
     if (!mem_read(pid, func, ins, sizeof(ins))) return false;
     uint64_t x[31] = {};
     bool have[31] = {};
-    for (int i = 0; i < 32; ++i) {
+    for (int i = 0; i < 64; ++i) {
         const uint32_t w = ins[i];
-        if (is_ret(w) || is_branch(w)) break;
+        const int skip = tbnz_skip(w);
+        if (skip && i + skip < 64) {
+            i += skip - 1;
+            continue;
+        }
+        if (is_ret(w) || ((w & 0xFFFFFC1Fu) == 0xD61F0000u)) break;
+        if ((w & 0xFC000000u) == 0x14000000u) {
+            int32_t imm = (int32_t)(w & 0x03FFFFFFu);
+            if (imm & 0x02000000) imm |= ~0x03FFFFFF;
+            if (imm > 0 && i + imm < 64) {
+                i += imm - 1;
+                continue;
+            }
+            break;
+        }
+        if ((w & 0xFC000000u) == 0x94000000u) {
+            for (int r = 0; r < 19; ++r) have[r] = false;
+            continue;
+        }
         int64_t page = 0;
         if (decode_adrp(w, func + (uint64_t)i * 4ull, page)) {
             const int rd = (int)(w & 31u);
@@ -208,9 +234,9 @@ bool decode_static_slot(pid_t pid, uintptr_t func, uintptr_t &slot) {
             const uint64_t off = (uint64_t)((w >> 10) & 0xFFFu) * 8ull;
             if (rn < 31 && have[rn]) {
                 uintptr_t addr = (uintptr_t)(x[rn] + off);
-                if (rt == 0) slot = addr;
+                if (rt == 0 && addr_ok(addr)) slot = addr;
                 uintptr_t val = 0;
-                if (rt < 31 && mem_read(pid, addr, &val, sizeof(val))) {
+                if (rt < 31 && addr_ok(addr) && mem_read(pid, addr, &val, sizeof(val))) {
                     x[rt] = val;
                     have[rt] = true;
                 }
@@ -228,6 +254,11 @@ int decode_vec3(pid_t pid, uintptr_t func) {
     int n = 0;
     for (int i = 0; i < 24; ++i) {
         const uint32_t w = ins[i];
+        const int skip = tbnz_skip(w);
+        if (skip && i + skip < 24) {
+            i += skip - 1;
+            continue;
+        }
         if (is_ret(w) || is_branch(w)) break;
         if ((w & 0xFFC00000u) != 0xBD400000u) continue;
         const int rn = (int)((w >> 5) & 31u);
@@ -275,12 +306,13 @@ int decode_ptr_field(pid_t pid, uintptr_t func) {
 }
 
 void log_code(pid_t pid, const char *label, uintptr_t func) {
-    uint32_t ins[4] = {};
+    uint32_t ins[8] = {};
     if (!func || !mem_read(pid, func, ins, sizeof(ins))) {
         elog("[esp] %s code missing", label);
         return;
     }
-    elog("[esp] %s code %08x %08x %08x %08x", label, ins[0], ins[1], ins[2], ins[3]);
+    elog("[esp] %s code %08x %08x %08x %08x %08x %08x %08x %08x", label, ins[0], ins[1], ins[2], ins[3],
+         ins[4], ins[5], ins[6], ins[7]);
 }
 
 struct StrKey {
@@ -349,6 +381,23 @@ uintptr_t follow_b(pid_t pid, uintptr_t func) {
     int32_t imm = (int32_t)(w & 0x03FFFFFFu);
     if (imm & 0x02000000) imm |= ~0x03FFFFFF;
     return func + (uintptr_t)(imm * 4);
+}
+
+uintptr_t unwrap_thunk(pid_t pid, uintptr_t func) {
+    func = follow_b(pid, func);
+    uint32_t ins[8] = {};
+    if (!mem_read(pid, func, ins, sizeof(ins))) return func;
+    for (int i = 0; i < 8; ++i) {
+        int64_t page = 0;
+        if (decode_adrp(ins[i], func + (uint64_t)i * 4ull, page)) return func;
+        if ((ins[i] & 0xFC000000u) != 0x94000000u) continue;
+        int32_t imm = (int32_t)(ins[i] & 0x03FFFFFFu);
+        if (imm & 0x02000000) imm |= ~0x03FFFFFF;
+        const uintptr_t dest = func + (uintptr_t)i * 4u + (uintptr_t)(imm * 4);
+        if (!dest || dest == func) return func;
+        return dest;
+    }
+    return func;
 }
 
 void search_strings(pid_t pid, const std::vector<Range> &ranges, std::vector<StrKey> &keys) {
@@ -701,8 +750,10 @@ void codm_esp_resolve(pid_t pid) {
             elog("[esp] libunity base=0x%llx using dump addresses", (unsigned long long)base);
             auto slot_from = [&](uintptr_t fn, const char *label) -> uintptr_t {
                 uintptr_t slot = 0;
-                const uintptr_t body = follow_b(pid, fn);
-                if (!decode_static_slot(pid, body, slot)) {
+                const uintptr_t body = unwrap_thunk(pid, fn);
+                if (body != fn)
+                    elog("[esp] %s thunk=0x%llx", label, (unsigned long long)body);
+                if (!decode_static_slot(pid, body, slot) || in_exec(ranges, slot)) {
                     log_code(pid, label, body);
                     return 0;
                 }
